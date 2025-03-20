@@ -13,10 +13,23 @@
 
 BOOLEAN g_IsInitial_IDT = TRUE;
 BOOLEAN g_IsInitial_MSRs = TRUE;
+BOOLEAN g_CR4_VMXE_Enabled = FALSE;
+
 PIDT_ENTRY g_InitialIDTEntries;
 PMSR_ENTRY g_InitialMSRs;
+ULONG_PTR g_SystemInformation;
+
 
 int g_MaxVectorNumber = 0;
+
+KTIMER TimerIDT;
+KDPC DPC_IDT;
+
+KTIMER TimerSSDT;
+KDPC DPC_SSDT;
+
+KTIMER TimerMSRs;
+KDPC DPC_MSRs;
 
 NTSTATUS CompleteRequest(PIRP Irp, NTSTATUS status, ULONG information)
 {
@@ -45,10 +58,71 @@ VOID UnloadRoutine(PDRIVER_OBJECT DriverObject)
 	if(g_InitialIDTEntries)
 	{
 		ExFreePool(g_InitialIDTEntries);
-		KdPrint(("PatchGuardEncryptor::UnloadRoutine: released Allocted IDT Entries copy allocated from non paged pool!\n"));
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: successfully released Allocted IDT Entries copy allocated from non paged pool!\n"));
 	}
 
+	if(g_InitialMSRs)
+	{
+		ExFreePool(g_InitialMSRs);
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: successfully released Allocted MSR_ENTRY Entries allocated from non paged pool!\n"));
+	}
+
+	// Cancel timers - if it's already cancelled/unset, then nothing will happen
+	if (KeCancelTimer(&TimerIDT))
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: IDT Timer was cancelled successfully!\n"));
+	else
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: IDT Timer was not active.\n"));
+
+	if (KeCancelTimer(&TimerMSRs))
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: MSRs Timer was cancelled successfully!\n"));
+	else
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: MSRs Timer was not active.\n"));
+
+	if (KeCancelTimer(&TimerSSDT))
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: SSDT Timer was cancelled successfully!\n"));
+	else
+		KdPrint(("PatchGuardEncryptor::UnloadRoutine: SSDT Timer was not active.\n"));
+
 	KdPrint(("PatchGuardEncryptor::UnloadRoutine: Driver unloaded successfully!\n"));
+}
+
+PVOID GetNtosBaseAddress()
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	UNICODE_STRING NtQuerySystemInformationName = RTL_CONSTANT_STRING(L"NtQuerySystemInformation");
+	typedef NTSTATUS (NTAPI * fNtQuerySytsemInformation)(SYSTEM_INFORMATION_CLASS SystemInformationClass,
+		PVOID SystemInformation,
+		ULONG SystemInformationLength,
+		PULONG ReturnLength
+		);
+
+	fNtQuerySytsemInformation NtQuerySystemInformation = (fNtQuerySytsemInformation)MmGetSystemRoutineAddress(&NtQuerySystemInformationName);
+	PVOID DummyMemory = ExAllocatePool(NonPagedPool, 1);
+	if(!DummyMemory)
+	{
+		KdPrint(("PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate DummyMemory!\n"));
+		return 0;
+	}
+	ULONG ReturnLength;
+	status = NtQuerySystemInformation(SystemModuleInformation, DummyMemory, 1, &ReturnLength);
+	if(status == STATUS_INFO_LENGTH_MISMATCH)
+	{
+
+		PSYSTEM_MODULE_INFORMATION ModuleInformationMemory = (PSYSTEM_MODULE_INFORMATION)ExAllocatePool(NonPagedPool, ReturnLength);
+		if (!ModuleInformationMemory) {
+			KdPrint(("PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate ModuleInformationMemory\n"));
+			return 0;
+		}
+		status = NtQuerySystemInformation(SystemModuleInformation, ModuleInformationMemory, ReturnLength, nullptr);
+		if(!NT_SUCCESS(status))
+		{
+			KdPrint(("PatchGuardEncryptor::GetNtosBaseAddress: NtQuerySystemInformation failed with: 0x%x\n", status));
+			return 0;
+		}
+		PVOID NtosBase = ModuleInformationMemory->Modules[0].ImageBase;
+		return NtosBase;
+	}
+	return 0;
 }
 
 VOID NTAPI EnumerateIDT()
@@ -116,7 +190,7 @@ VOID NTAPI EnumerateIDT()
 			ServiceRoutine = ServiceRoutine ^ (Middle << 16);
 			ServiceRoutine = ServiceRoutine ^ Low;
 	
-			KdPrint(("PatchGuardEncryptor::EnumerateIDT: Comparing Service Routine[%d]: 0x%p with g_InitialIDTEntries[%d].ServiceRoutine: 0x%p\n", i, ServiceRoutine, i, g_InitialIDTEntries[i].ServiceRoutine));
+			KdPrint(("PatchGuardEncryptor::EnumerateIDT: Comparing Service Routine[%x]: 0x%p with g_InitialIDTEntries[%x].ServiceRoutine: 0x%p\n", i, ServiceRoutine, i, g_InitialIDTEntries[i].ServiceRoutine));
 			if ((PVOID)ServiceRoutine != g_InitialIDTEntries[i].ServiceRoutine)
 			{
 				/*
@@ -175,247 +249,396 @@ VOID EnumerateMSRs()
 
 	if(g_IsInitial_MSRs)
 	{
-		g_InitialMSRs[0].MSRIndex = MSR_IA32_VMX_BASIC;
-		g_InitialMSRs[0].MSRValue = __readmsr(MSR_IA32_VMX_BASIC);
+		ULONG reg_cr4 = __readcr4();
+		KdPrint(("CR4 value: 0x%p\n", reg_cr4));
+		if ((reg_cr4 & (1 << 13)) != 0x0) //CR4.VMXE (Virtual Machine Extension Enabled) is at index 13 
+		{
+			KdPrint(("PatchGuardEncryptorDriver::EnumerateMSRs: CR4.VMXE = 0x1\n"));
+			g_CR4_VMXE_Enabled = TRUE;
+		
+			g_InitialMSRs[0].MSRIndex = MSR_IA32_VMX_BASIC;
+			g_InitialMSRs[0].MSRValue = __readmsr(MSR_IA32_VMX_BASIC);
 
-		g_InitialMSRs[1].MSRIndex = MSR_IA32_VMX_PINBASED_CTLS;
-		g_InitialMSRs[1].MSRValue = __readmsr(MSR_IA32_VMX_PINBASED_CTLS);
+			g_InitialMSRs[1].MSRIndex = MSR_IA32_VMX_PINBASED_CTLS;
+			g_InitialMSRs[1].MSRValue = __readmsr(MSR_IA32_VMX_PINBASED_CTLS);
 
-		g_InitialMSRs[2].MSRIndex = MSR_IA32_VMX_PROCBASED_CTLS;
-		g_InitialMSRs[2].MSRValue = __readmsr(MSR_IA32_VMX_PROCBASED_CTLS);
+			g_InitialMSRs[2].MSRIndex = MSR_IA32_VMX_PROCBASED_CTLS;
+			g_InitialMSRs[2].MSRValue = __readmsr(MSR_IA32_VMX_PROCBASED_CTLS);
 
-		g_InitialMSRs[3].MSRIndex = MSR_IA32_VMX_EXIT_CTLS;
-		g_InitialMSRs[3].MSRValue = __readmsr(MSR_IA32_VMX_EXIT_CTLS);
+			g_InitialMSRs[3].MSRIndex = MSR_IA32_VMX_EXIT_CTLS;
+			g_InitialMSRs[3].MSRValue = __readmsr(MSR_IA32_VMX_EXIT_CTLS);
 
-		g_InitialMSRs[4].MSRIndex = MSR_IA32_VMX_ENTRY_CTLS;
-		g_InitialMSRs[4].MSRValue = __readmsr(MSR_IA32_VMX_ENTRY_CTLS);
+			g_InitialMSRs[4].MSRIndex = MSR_IA32_VMX_ENTRY_CTLS;
+			g_InitialMSRs[4].MSRValue = __readmsr(MSR_IA32_VMX_ENTRY_CTLS);
 
-		g_InitialMSRs[5].MSRIndex = MSR_IA32_VMX_MISC;
-		g_InitialMSRs[5].MSRValue = __readmsr(MSR_IA32_VMX_MISC);
+			g_InitialMSRs[5].MSRIndex = MSR_IA32_VMX_MISC;
+			g_InitialMSRs[5].MSRValue = __readmsr(MSR_IA32_VMX_MISC);
 
-		g_InitialMSRs[6].MSRIndex = MSR_IA32_VMX_CR0_FIXED0;
-		g_InitialMSRs[6].MSRValue = __readmsr(MSR_IA32_VMX_CR0_FIXED0);
+			g_InitialMSRs[6].MSRIndex = MSR_IA32_VMX_CR0_FIXED0;
+			g_InitialMSRs[6].MSRValue = __readmsr(MSR_IA32_VMX_CR0_FIXED0);
 
-		g_InitialMSRs[7].MSRIndex = MSR_IA32_VMX_CR0_FIXED1;
-		g_InitialMSRs[7].MSRValue = __readmsr(MSR_IA32_VMX_CR0_FIXED1);
+			g_InitialMSRs[7].MSRIndex = MSR_IA32_VMX_CR0_FIXED1;
+			g_InitialMSRs[7].MSRValue = __readmsr(MSR_IA32_VMX_CR0_FIXED1);
 
-		g_InitialMSRs[8].MSRIndex = MSR_IA32_VMX_CR4_FIXED0;
-		g_InitialMSRs[8].MSRValue = __readmsr(MSR_IA32_VMX_CR4_FIXED0);
+			g_InitialMSRs[8].MSRIndex = MSR_IA32_VMX_CR4_FIXED0;
+			g_InitialMSRs[8].MSRValue = __readmsr(MSR_IA32_VMX_CR4_FIXED0);
 
-		g_InitialMSRs[9].MSRIndex = MSR_IA32_VMX_CR4_FIXED1;
-		g_InitialMSRs[9].MSRValue = __readmsr(MSR_IA32_VMX_CR4_FIXED1);
+			g_InitialMSRs[9].MSRIndex = MSR_IA32_VMX_CR4_FIXED1;
+			g_InitialMSRs[9].MSRValue = __readmsr(MSR_IA32_VMX_CR4_FIXED1);
 
-		g_InitialMSRs[10].MSRIndex = MSR_IA32_VMX_VMCS_ENUM;
-		g_InitialMSRs[10].MSRValue = __readmsr(MSR_IA32_VMX_VMCS_ENUM);
+			g_InitialMSRs[10].MSRIndex = MSR_IA32_VMX_VMCS_ENUM;
+			g_InitialMSRs[10].MSRValue = __readmsr(MSR_IA32_VMX_VMCS_ENUM);
 
-		g_InitialMSRs[11].MSRIndex = MSR_IA32_VMX_PROCBASED_CTLS2;
-		g_InitialMSRs[11].MSRValue = __readmsr(MSR_IA32_VMX_PROCBASED_CTLS2);
+			g_InitialMSRs[11].MSRIndex = MSR_IA32_VMX_PROCBASED_CTLS2;
+			g_InitialMSRs[11].MSRValue = __readmsr(MSR_IA32_VMX_PROCBASED_CTLS2);
 
-		g_InitialMSRs[12].MSRIndex = MSR_IA32_VMX_EPT_VPID_CAP;
-		g_InitialMSRs[12].MSRValue = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+			g_InitialMSRs[12].MSRIndex = MSR_IA32_VMX_EPT_VPID_CAP;
+			g_InitialMSRs[12].MSRValue = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
 
-		g_InitialMSRs[13].MSRIndex = MSR_EFER;
-		g_InitialMSRs[13].MSRValue = __readmsr(MSR_EFER);
+			g_InitialMSRs[13].MSRIndex = MSR_EFER;
+			g_InitialMSRs[13].MSRValue = __readmsr(MSR_EFER);
 
-		g_InitialMSRs[14].MSRIndex = MSR_STAR;
-		g_InitialMSRs[14].MSRValue = __readmsr(MSR_STAR);
+			g_InitialMSRs[14].MSRIndex = MSR_STAR;
+			g_InitialMSRs[14].MSRValue = __readmsr(MSR_STAR);
 
-		g_InitialMSRs[15].MSRIndex = MSR_LSTAR;
-		g_InitialMSRs[15].MSRValue = __readmsr(MSR_LSTAR);
+			g_InitialMSRs[15].MSRIndex = MSR_LSTAR;
+			g_InitialMSRs[15].MSRValue = __readmsr(MSR_LSTAR);
 
-		g_InitialMSRs[16].MSRIndex = MSR_CSTAR;
-		g_InitialMSRs[16].MSRValue = __readmsr(MSR_CSTAR);
+			g_InitialMSRs[16].MSRIndex = MSR_CSTAR;
+			g_InitialMSRs[16].MSRValue = __readmsr(MSR_CSTAR);
 
-		g_InitialMSRs[17].MSRIndex = MSR_FS_BASE;
-		g_InitialMSRs[17].MSRValue = __readmsr(MSR_FS_BASE);
+			g_InitialMSRs[17].MSRIndex = MSR_FS_BASE;
+			g_InitialMSRs[17].MSRValue = __readmsr(MSR_FS_BASE);
 
-		g_InitialMSRs[18].MSRIndex = MSR_GS_BASE;
-		g_InitialMSRs[18].MSRValue = __readmsr(MSR_GS_BASE);
+			g_InitialMSRs[18].MSRIndex = MSR_GS_BASE;
+			g_InitialMSRs[18].MSRValue = __readmsr(MSR_GS_BASE);
 
-		g_InitialMSRs[19].MSRIndex = MSR_KERNEL_GS_BASE;
-		g_InitialMSRs[19].MSRValue = __readmsr(MSR_KERNEL_GS_BASE);
+			g_InitialMSRs[19].MSRIndex = MSR_KERNEL_GS_BASE;
+			g_InitialMSRs[19].MSRValue = __readmsr(MSR_KERNEL_GS_BASE);
 
-		g_InitialMSRs[20].MSRIndex = MSR_IA32_APICBASE;
-		g_InitialMSRs[20].MSRValue = __readmsr(MSR_IA32_APICBASE);
+			g_InitialMSRs[20].MSRIndex = MSR_IA32_APICBASE;
+			g_InitialMSRs[20].MSRValue = __readmsr(MSR_IA32_APICBASE);
 
-		g_InitialMSRs[21].MSRIndex = MSR_IA32_APICBASE_BSP;
-		g_InitialMSRs[21].MSRValue = __readmsr(MSR_IA32_APICBASE_BSP);
+			g_InitialMSRs[21].MSRIndex = MSR_SYSCALL_MASK;
+			g_InitialMSRs[21].MSRValue = __readmsr(MSR_SYSCALL_MASK);
 
-		g_InitialMSRs[22].MSRIndex = MSR_IA32_APICBASE_ENABLE;
-		g_InitialMSRs[22].MSRValue = __readmsr(MSR_IA32_APICBASE_ENABLE);
+			//g_InitialMSRs[21].MSRIndex = MSR_IA32_APICBASE_BSP;
+			//g_InitialMSRs[21].MSRValue = __readmsr(MSR_IA32_APICBASE_BSP);
+			//
+			//g_InitialMSRs[22].MSRIndex = MSR_IA32_APICBASE_ENABLE;
+			//g_InitialMSRs[22].MSRValue = __readmsr(MSR_IA32_APICBASE_ENABLE);
+			//
+			//g_InitialMSRs[23].MSRIndex = MSR_IA32_APICBASE_BASE;
+			//g_InitialMSRs[23].MSRValue = __readmsr(MSR_IA32_APICBASE_BASE);
+			//
+			//g_InitialMSRs[24].MSRIndex = MSR_SYSCALL_MASK;
+			//g_InitialMSRs[24].MSRValue = __readmsr(MSR_SYSCALL_MASK);
 
-		g_InitialMSRs[23].MSRIndex = MSR_IA32_APICBASE_BASE;
-		g_InitialMSRs[23].MSRValue = __readmsr(MSR_IA32_APICBASE_BASE);	
+			KdPrint(("PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=1 -> successfully filled g_InitialMSRs at base address: 0x%p\n", g_InitialMSRs));
 
-		g_InitialMSRs[24].MSRIndex = MSR_SYSCALL_MASK;
-		g_InitialMSRs[24].MSRValue = __readmsr(MSR_SYSCALL_MASK);
+			g_IsInitial_MSRs = FALSE;
+			return;
+		}
 
-		KdPrint(("PatchGuardEncryptor::EnumerateMSR: successfully filled g_InitialMSRs at base address: 0x%p\n", g_InitialMSRs));
+		g_InitialMSRs[0].MSRIndex = MSR_EFER;
+		g_InitialMSRs[0].MSRValue = __readmsr(MSR_EFER);
 
-		g_IsInitial_MSRs = FALSE;
+		g_InitialMSRs[1].MSRIndex = MSR_STAR;
+		g_InitialMSRs[1].MSRValue = __readmsr(MSR_STAR);
+
+		g_InitialMSRs[2].MSRIndex = MSR_LSTAR;
+		g_InitialMSRs[2].MSRValue = __readmsr(MSR_LSTAR);
+
+		g_InitialMSRs[3].MSRIndex = MSR_CSTAR;
+		g_InitialMSRs[3].MSRValue = __readmsr(MSR_CSTAR);
+
+		g_InitialMSRs[4].MSRIndex = MSR_FS_BASE;
+		g_InitialMSRs[4].MSRValue = __readmsr(MSR_FS_BASE);
+
+		g_InitialMSRs[5].MSRIndex = MSR_GS_BASE;
+		g_InitialMSRs[5].MSRValue = __readmsr(MSR_GS_BASE);
+
+		g_InitialMSRs[6].MSRIndex = MSR_KERNEL_GS_BASE;
+		g_InitialMSRs[6].MSRValue = __readmsr(MSR_KERNEL_GS_BASE);
+
+		g_InitialMSRs[7].MSRIndex = MSR_IA32_APICBASE;
+		g_InitialMSRs[7].MSRValue = __readmsr(MSR_IA32_APICBASE);
+
+		g_InitialMSRs[8].MSRIndex = MSR_SYSCALL_MASK;
+		g_InitialMSRs[8].MSRValue = __readmsr(MSR_SYSCALL_MASK);
+
+		//g_InitialMSRs[8].MSRIndex = MSR_IA32_APICBASE_BSP;
+		//g_InitialMSRs[8].MSRValue = __readmsr(MSR_IA32_APICBASE_BSP);
+		//
+		//g_InitialMSRs[9].MSRIndex = MSR_IA32_APICBASE_ENABLE;
+		//g_InitialMSRs[9].MSRValue = __readmsr(MSR_IA32_APICBASE_ENABLE);
+		//
+		//g_InitialMSRs[10].MSRIndex = MSR_IA32_APICBASE_BASE;
+		//g_InitialMSRs[10].MSRValue = __readmsr(MSR_IA32_APICBASE_BASE);	
+		//
+		//g_InitialMSRs[11].MSRIndex = MSR_SYSCALL_MASK;
+		//g_InitialMSRs[11].MSRValue = __readmsr(MSR_SYSCALL_MASK);
+	
+		KdPrint(("PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=0 successfully filled g_InitialMSRs at base address: 0x%p\n", g_InitialMSRs));
+	
+		g_IsInitial_MSRs = FALSE; // Might need to be at the start
+		return;
+	}
+
+	if(g_CR4_VMXE_Enabled)
+	{
+		KdPrint(("PatchGuardEncryptor::EnumerateMSRs: CR4.VMXE=1 -> Comparing current MSRs with initial MSRs\n"));
+
+		// Verify if each "if" statement compares with the correct index!!
+		if (g_InitialMSRs[0].MSRValue != __readmsr(MSR_IA32_VMX_BASIC))
+		{
+			KdPrint(("MSR_IA32_VMX_BASIC (0x%x) was changed!\n", MSR_IA32_VMX_BASIC));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[1].MSRValue != __readmsr(MSR_IA32_VMX_PINBASED_CTLS))
+		{
+			KdPrint(("MSR_IA32_VMX_PINBASED_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_PINBASED_CTLS));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[2].MSRValue != __readmsr(MSR_IA32_VMX_PROCBASED_CTLS))
+		{
+			KdPrint(("MSR_IA32_VMX_PROCBASED_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_PROCBASED_CTLS));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[3].MSRValue != __readmsr(MSR_IA32_VMX_EXIT_CTLS))
+		{
+			KdPrint(("MSR_IA32_VMX_EXIT_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_EXIT_CTLS));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[4].MSRValue != __readmsr(MSR_IA32_VMX_ENTRY_CTLS))
+		{
+			KdPrint(("MSR_IA32_VMX_ENTRY_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_ENTRY_CTLS));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[5].MSRValue != __readmsr(MSR_IA32_VMX_MISC))
+		{
+			KdPrint(("MSR_IA32_VMX_MISC (0x%x) was changed!\n", MSR_IA32_VMX_MISC));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[6].MSRValue != __readmsr(MSR_IA32_VMX_CR0_FIXED0))
+		{
+			KdPrint(("MSR_IA32_VMX_CR0_FIXED0 (0x%x) was changed!\n", MSR_IA32_VMX_CR0_FIXED0));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[7].MSRValue != __readmsr(MSR_IA32_VMX_CR0_FIXED1))
+		{
+			KdPrint(("MSR_IA32_VMX_CR0_FIXED1 (0x%x) was changed!\n", MSR_IA32_VMX_CR0_FIXED1));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[8].MSRValue != __readmsr(MSR_IA32_VMX_CR4_FIXED0))
+		{
+			KdPrint(("MSR_IA32_VMX_CR4_FIXED0 (0x%x) was changed!\n", MSR_IA32_VMX_CR4_FIXED0));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[9].MSRValue != __readmsr(MSR_IA32_VMX_CR4_FIXED1))
+		{
+			KdPrint(("MSR_IA32_VMX_CR4_FIXED1 (0x%x) was changed!\n", MSR_IA32_VMX_CR4_FIXED1));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[10].MSRValue != __readmsr(MSR_IA32_VMX_VMCS_ENUM))
+		{
+			KdPrint(("MSR_IA32_VMX_VMCS_ENUM (0x%x) was changed!\n", MSR_IA32_VMX_VMCS_ENUM));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[11].MSRValue != __readmsr(MSR_IA32_VMX_PROCBASED_CTLS2))
+		{
+			KdPrint(("MSR_IA32_VMX_PROCBASED_CTLS2 (0x%x) was changed!\n", MSR_IA32_VMX_PROCBASED_CTLS2));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[12].MSRValue != __readmsr(MSR_IA32_VMX_EPT_VPID_CAP))
+		{
+			KdPrint(("MSR_IA32_VMX_EPT_VPID_CAP (0x%x) was changed!\n", MSR_IA32_VMX_EPT_VPID_CAP));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[13].MSRValue != MSR_EFER)
+		{
+			KdPrint(("MSR_EFER (0x%x) was changed!\n", MSR_EFER));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[14].MSRValue != __readmsr(MSR_STAR))
+		{
+			KdPrint(("MSR_STAR (0x%x) was changed!\n", MSR_STAR));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[15].MSRValue != __readmsr(MSR_LSTAR))
+		{
+			KdPrint(("MSR_LSTAR (0x%x) was changed!\n", MSR_LSTAR));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[16].MSRValue != __readmsr(MSR_CSTAR))
+		{
+			KdPrint(("MSR_CSTAR (0x%x) was changed!\n", MSR_CSTAR));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[17].MSRValue != __readmsr(MSR_FS_BASE))
+		{
+			KdPrint(("MSR_FS_BASE (0x%x) was changed!\n", MSR_FS_BASE));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[18].MSRValue != __readmsr(MSR_GS_BASE))
+		{
+			KdPrint(("MSR_GS_BASE (0x%x) was changed!\n", MSR_GS_BASE));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[19].MSRValue != __readmsr(MSR_KERNEL_GS_BASE))
+		{
+			KdPrint(("MSR_KERNEL_GS_BASE (0x%x) was changed!\n", MSR_KERNEL_GS_BASE));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[20].MSRValue != __readmsr(MSR_IA32_APICBASE))
+		{
+			KdPrint(("MSR_IA32_APICBASE (0x%x) was changed!\n", MSR_IA32_APICBASE));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		if (g_InitialMSRs[21].MSRValue != __readmsr(MSR_SYSCALL_MASK))
+		{
+			KdPrint(("MSR_SYSCALL_MASK (0x%x) was changed!\n", MSR_SYSCALL_MASK));
+			//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		}
+
+		//if (g_InitialMSRs[21].MSRValue != __readmsr(MSR_IA32_APICBASE_BSP))
+		//{
+		//	KdPrint(("MSR_IA32_APICBASE_BSP (0x%x) was changed!\n", MSR_IA32_APICBASE_BSP));
+		//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		//}
+		//
+		//if (g_InitialMSRs[22].MSRValue != __readmsr(MSR_IA32_APICBASE_ENABLE))
+		//{
+		//	KdPrint(("MSR_IA32_APICBASE_ENABLE (0x%x) was changed!\n", MSR_IA32_APICBASE_ENABLE));
+		//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		//}
+		//
+		//if (g_InitialMSRs[23].MSRValue != __readmsr(MSR_IA32_APICBASE_BASE))
+		//{
+		//	KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
+		//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		//}
+		//
+		//
+		//if (g_InitialMSRs[24].MSRValue != __readmsr(MSR_SYSCALL_MASK))
+		//{
+		//	KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
+		//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+		//}
+
 		return;
 	}
 
 
-	// Verify if each "if" statement compares with the correct index!!
-
-	if(g_InitialMSRs[0].MSRValue != __readmsr(MSR_IA32_VMX_BASIC))
-	{
-		KdPrint(("MSR_IA32_VMX_BASIC (0x%x) was changed!\n", MSR_IA32_VMX_BASIC));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[1].MSRValue != __readmsr(MSR_IA32_VMX_PINBASED_CTLS))
-	{
-		KdPrint(("MSR_IA32_VMX_PINBASED_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_PINBASED_CTLS));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[2].MSRValue != __readmsr(MSR_IA32_VMX_PROCBASED_CTLS))
-	{
-		KdPrint(("MSR_IA32_VMX_PROCBASED_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_PROCBASED_CTLS));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[3].MSRValue != __readmsr(MSR_IA32_VMX_EXIT_CTLS))
-	{
-		KdPrint(("MSR_IA32_VMX_EXIT_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_EXIT_CTLS));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[4].MSRValue != __readmsr(MSR_IA32_VMX_ENTRY_CTLS))
-	{
-		KdPrint(("MSR_IA32_VMX_ENTRY_CTLS (0x%x) was changed!\n", MSR_IA32_VMX_ENTRY_CTLS));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[5].MSRValue != __readmsr(MSR_IA32_VMX_MISC))
-	{
-		KdPrint(("MSR_IA32_VMX_MISC (0x%x) was changed!\n", MSR_IA32_VMX_MISC));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[6].MSRValue != __readmsr(MSR_IA32_VMX_CR0_FIXED0))
-	{
-		KdPrint(("MSR_IA32_VMX_CR0_FIXED0 (0x%x) was changed!\n", MSR_IA32_VMX_CR0_FIXED0));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[7].MSRValue != __readmsr(MSR_IA32_VMX_CR0_FIXED1))
-	{
-		KdPrint(("MSR_IA32_VMX_CR0_FIXED1 (0x%x) was changed!\n", MSR_IA32_VMX_CR0_FIXED1));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[8].MSRValue != __readmsr(MSR_IA32_VMX_CR4_FIXED0))
-	{
-		KdPrint(("MSR_IA32_VMX_CR4_FIXED0 (0x%x) was changed!\n", MSR_IA32_VMX_CR4_FIXED0));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[9].MSRValue != __readmsr(MSR_IA32_VMX_CR4_FIXED1))
-	{
-		KdPrint(("MSR_IA32_VMX_CR4_FIXED1 (0x%x) was changed!\n", MSR_IA32_VMX_CR4_FIXED1));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[10].MSRValue != __readmsr(MSR_IA32_VMX_VMCS_ENUM))
-	{
-		KdPrint(("MSR_IA32_VMX_VMCS_ENUM (0x%x) was changed!\n", MSR_IA32_VMX_VMCS_ENUM));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[11].MSRValue != __readmsr(MSR_IA32_VMX_PROCBASED_CTLS2))
-	{
-		KdPrint(("MSR_IA32_VMX_PROCBASED_CTLS2 (0x%x) was changed!\n", MSR_IA32_VMX_PROCBASED_CTLS2));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[12].MSRValue != __readmsr(MSR_IA32_VMX_EPT_VPID_CAP))
-	{
-		KdPrint(("MSR_IA32_VMX_EPT_VPID_CAP (0x%x) was changed!\n", MSR_IA32_VMX_EPT_VPID_CAP));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-	if (g_InitialMSRs[13].MSRValue != MSR_EFER)
+	if (g_InitialMSRs[0].MSRValue != __readmsr(MSR_EFER))
 	{
 		KdPrint(("MSR_EFER (0x%x) was changed!\n", MSR_EFER));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[14].MSRValue != __readmsr(MSR_STAR))
+	if (g_InitialMSRs[1].MSRValue != __readmsr(MSR_STAR))
 	{
 		KdPrint(("MSR_STAR (0x%x) was changed!\n", MSR_STAR));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[15].MSRValue != __readmsr(MSR_LSTAR))
+	if (g_InitialMSRs[2].MSRValue != __readmsr(MSR_LSTAR))
 	{
 		KdPrint(("MSR_LSTAR (0x%x) was changed!\n", MSR_LSTAR));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[16].MSRValue != __readmsr(MSR_CSTAR))
+	if (g_InitialMSRs[3].MSRValue != __readmsr(MSR_CSTAR))
 	{
 		KdPrint(("MSR_CSTAR (0x%x) was changed!\n", MSR_CSTAR));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[17].MSRValue != __readmsr(MSR_FS_BASE))
+	if (g_InitialMSRs[4].MSRValue != __readmsr(MSR_FS_BASE))
 	{
 		KdPrint(("MSR_FS_BASE (0x%x) was changed!\n", MSR_FS_BASE));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[18].MSRValue != __readmsr(MSR_GS_BASE))
+	if (g_InitialMSRs[5].MSRValue != __readmsr(MSR_GS_BASE))
 	{
 		KdPrint(("MSR_GS_BASE (0x%x) was changed!\n", MSR_GS_BASE));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[19].MSRValue != __readmsr(MSR_KERNEL_GS_BASE))
+	if (g_InitialMSRs[6].MSRValue != __readmsr(MSR_KERNEL_GS_BASE))
 	{
 		KdPrint(("MSR_KERNEL_GS_BASE (0x%x) was changed!\n", MSR_KERNEL_GS_BASE));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[20].MSRValue != __readmsr(MSR_IA32_APICBASE))
+	if (g_InitialMSRs[7].MSRValue != __readmsr(MSR_IA32_APICBASE))
 	{
 		KdPrint(("MSR_IA32_APICBASE (0x%x) was changed!\n", MSR_IA32_APICBASE));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[21].MSRValue != __readmsr(MSR_IA32_APICBASE_BSP))
+	if (g_InitialMSRs[8].MSRValue != __readmsr(MSR_SYSCALL_MASK))
 	{
-		KdPrint(("MSR_IA32_APICBASE_BSP (0x%x) was changed!\n", MSR_IA32_APICBASE_BSP));
+		KdPrint(("MSR_SYSCALL_MASK (0x%x) was changed!\n", MSR_SYSCALL_MASK));
 		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
 	}
 
-	if (g_InitialMSRs[22].MSRValue != __readmsr(MSR_IA32_APICBASE_ENABLE))
-	{
-		KdPrint(("MSR_IA32_APICBASE_ENABLE (0x%x) was changed!\n", MSR_IA32_APICBASE_ENABLE));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
+	//if (g_InitialMSRs[8].MSRValue != __readmsr(MSR_IA32_APICBASE_BSP))
+	//{
+	//	KdPrint(("MSR_IA32_APICBASE_BSP (0x%x) was changed!\n", MSR_IA32_APICBASE_BSP));
+	//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+	//}
+	//
+	//if (g_InitialMSRs[9].MSRValue != __readmsr(MSR_IA32_APICBASE_ENABLE))
+	//{
+	//	KdPrint(("MSR_IA32_APICBASE_ENABLE (0x%x) was changed!\n", MSR_IA32_APICBASE_ENABLE));
+	//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+	//}
+	//
+	//if (g_InitialMSRs[10].MSRValue != __readmsr(MSR_IA32_APICBASE_BASE))
+	//{
+	//	KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
+	//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+	//}
+	//
+	//
+	//if (g_InitialMSRs[11].MSRValue != __readmsr(MSR_SYSCALL_MASK))
+	//{
+	//	KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
+	//	//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
+	//}
 
-	if (g_InitialMSRs[23].MSRValue != __readmsr(MSR_IA32_APICBASE_BASE))
-	{
-		KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
-
-
-	if (g_InitialMSRs[24].MSRValue != __readmsr(MSR_SYSCALL_MASK))
-	{
-		KdPrint(("MSR_IA32_APICBASE_BASE (0x%x) was changed!\n", MSR_IA32_APICBASE_BASE));
-		//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); //0x7 = A critical MSR modification
-	}
 }
 
 
-VOID DPCInterruptDispatchTable(_KDPC Dpc, PVOID DeferredContext, PVOID, PVOID)
+VOID DPCInterruptDispatchTable(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2)
 {
-	UNREFERENCED_PARAMETER(DeferredContext); // Might pass the base address of the IDT in the DeferredContext
-	UNREFERENCED_PARAMETER(Dpc); 
+	KdPrint(("Dpc at 0x%p\n", Dpc));
+	KdPrint(("DeferredContext at 0x%p\n", DeferredContext));
+	KdPrint(("SystemArgument1 at 0x%p\n", SystemArgument1));
+	KdPrint(("SystemArgument2 at 0x%p\n", SystemArgument2));
 
 	NT_ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
@@ -424,8 +647,11 @@ VOID DPCInterruptDispatchTable(_KDPC Dpc, PVOID DeferredContext, PVOID, PVOID)
 	 with a malicious function pointer that automatically increases the IRQL to HIGH_LEVEL and prevent the timer DPC from being invoked.
 	 Since working in a HIGH_LEVEL IRQL is an expensive operation, it must to be minimal and effective.
 	*/
+
 	KIRQL CurrentIRQL;
 	KeRaiseIrql(HIGH_LEVEL, &CurrentIRQL);
+
+	KdPrint(("DPCInterruptDispatchTable was invoked!\n"));
 
 	EnumerateIDT();
 
@@ -445,18 +671,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
 	UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\PatchGuardEncryptor");
 	UNICODE_STRING DeviceSymlink = RTL_CONSTANT_STRING(L"\\??\\PatchGuardEncryptor");
-
-
-	KTIMER TimerIDT;
-	KDPC DPC_IDT;
-
-	/*
-	KTIMER TimerSSDT;
-	KDPC DPC_SSDT;
-
-	KTIMER TimerMSRs;
-	KDPC DPC_MSRs;
-	*/
 
 	PDEVICE_OBJECT DeviceObject;
 	NTSTATUS status = STATUS_SUCCESS;
@@ -486,7 +700,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	if(!g_InitialIDTEntries)
 	{
 		KdPrint(("PatchGuardEncryptor::DriverEntry: Allocating with ExAllocatePool() failed! g_InitialIDTEntries: 0x%p\n", g_InitialIDTEntries));
-		//status = STATUS_INSUFFICIENT_RESOURCES;
+		status = STATUS_INSUFFICIENT_RESOURCES;
 		UnloadRoutine(DriverObject); // Need to verify if it's valid. I execute the UnloadRoutine() because for some reason
 									 // the driver and the device object allocated can't be unloaded from kernel space if the status isn't STATUS_SUCCESS.
 		return status;
@@ -498,7 +712,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	if(!g_InitialMSRs)
 	{
 		KdPrint(("PatchGuardEncryptor::DriverEntry: Allocating with ExAllocatePool() failed! g_InitialMSRs: 0x%p\n", g_InitialMSRs));
-		//status = STATUS_INSUFFICIENT_RESOURCES;
+		status = STATUS_INSUFFICIENT_RESOURCES;
 		UnloadRoutine(DriverObject); // Need to verify if it's valid. I execute the UnloadRoutine() because for some reason
 		// the driver and the device object allocated can't be unloaded from kernel space if the status isn't STATUS_SUCCESS.
 		return status;
@@ -506,17 +720,19 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
 	KdPrint(("Allocated an array in non-paged pool of 256 MSR_ENTRY structures at address: 0x%p\n", g_InitialMSRs));
 
-
 	EnumerateIDT(); // This is supposed to be executed both in the DriverEntry and both in the IDT DPC
-
-	//// Timer causes a BSOD!!! WITH KERNEL_SECURITY_CHECK bugcheck
-	//KeInitializeDpc(&DPC_IDT, (PKDEFERRED_ROUTINE)DPCInterruptDispatchTable, nullptr);
+	EnumerateMSRs();
 	
-	//LARGE_INTEGER DueTime;
-	//DueTime.QuadPart = -10000 * 10; // check
+	LARGE_INTEGER DueTime;
+	DueTime.QuadPart = -3 * 10 * 1000 * 1000; // 3 seconds
+	LONG Period = 2 * 1000; // 2 seconds interval
 
-	//KeInitializeTimer(&TimerIDT);
-	//KeSetTimer(&TimerIDT, DueTime, &DPC_IDT);
+	KeInitializeDpc(&DPC_IDT, (PKDEFERRED_ROUTINE)DPCInterruptDispatchTable, nullptr);
+	KeInitializeTimerEx(&TimerIDT, NotificationTimer); // NotificationTimer makes it periodic
+
+	KeSetTimerEx(&TimerIDT, DueTime, Period, &DPC_IDT);
+
+	KdPrint(("Ntoskrnl base address: 0x%p\n", GetNtosBaseAddress()));
 	
 	return status;
 }
