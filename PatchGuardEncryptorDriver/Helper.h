@@ -1,6 +1,8 @@
 #pragma once
 #include <ntddk.h>
 
+#define SystemProcessInformationSize 1024 * 1024 * 2
+
 //0x10 bytes (sizeof)
 union _KIDTENTRY64
 {
@@ -9,13 +11,13 @@ union _KIDTENTRY64
         USHORT OffsetLow;                                                   //0x0
         USHORT Selector;                                                    //0x2
     };
-    USHORT IstIndex : 3;                                                      //0x4
-    USHORT Reserved0 : 5;                                                     //0x4
-    USHORT Type : 5;                                                          //0x4
-    USHORT Dpl : 2;                                                           //0x4
+    USHORT IstIndex : 3;                                                    //0x4
+    USHORT Reserved0 : 5;                                                   //0x4
+    USHORT Type : 5;                                                        //0x4
+    USHORT Dpl : 2;                                                         //0x4
     struct
     {
-        USHORT Present : 1;                                                   //0x4
+        USHORT Present : 1;                                                 //0x4
         USHORT OffsetMiddle;                                                //0x6
     };
     struct
@@ -28,20 +30,26 @@ union _KIDTENTRY64
 
 typedef struct _IDT_ENTRY
 {
-    DWORD32 Vector;
-    PVOID ServiceRoutine;
+    DWORD32 Vector;			// The vector number of the relative interrupt in the IDT
+    PVOID ServiceRoutine;	// The kernel address of the service routine
 } IDT_ENTRY, *PIDT_ENTRY;
 
 typedef struct _MSR_ENTRY
 {
-    DWORD32 MSRIndex;
-    ULONG_PTR MSRValue;
+    DWORD32 MSRIndex;		// The MSR Index (i.e 0xC0000082)
+    ULONG_PTR MSRValue;		// The inital value within the relative MSR register
 } MSR_ENTRY, *PMSR_ENTRY;
+
+typedef struct _SSDT_ENTRY
+{
+	DWORD32 SyscallNumber;	// Will serve as the index in the SSDT
+	DWORD32 SSDTValue;		// The SSDT value in the relative SCN
+} SSDT_ENTRY, *PSSDT_ENTRY;
 
 typedef enum _SYSTEM_INFORMATION_CLASS
 {
 	SystemBasicInformation = 0,
-	SystemProcessorInformation = 1,             // obsolete...delete
+	SystemProcessorInformation = 1,           
 	SystemPerformanceInformation = 2,
 	SystemTimeOfDayInformation = 3,
 	SystemPathInformation = 4,
@@ -130,8 +138,8 @@ typedef enum _SYSTEM_INFORMATION_CLASS
 typedef struct _SYSTEM_MODULE {
 	PVOID  Reserved1;
 	PVOID  Reserved2;
-	PVOID  ImageBase;      // Base address of the module
-	ULONG  ImageSize;
+	PVOID  ImageBase;		// Base address of the module
+	ULONG  ImageSize;		// Size of the image
 	ULONG  Flags;
 	USHORT LoadOrderIndex;
 	USHORT InitOrderIndex;
@@ -146,7 +154,4 @@ typedef struct _SYSTEM_MODULE_INFORMATION {
 } SYSTEM_MODULE_INFORMATION, * PSYSTEM_MODULE_INFORMATION;
 
 
-
-#define SystemProcessInformationSize 1024 * 1024 * 2
-//#define STATUS_INFO_LENGTH_MISMATCH 0xC0000004
 
