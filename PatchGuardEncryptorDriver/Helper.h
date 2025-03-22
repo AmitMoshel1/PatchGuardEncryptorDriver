@@ -2,6 +2,8 @@
 #include <ntddk.h>
 
 #define SystemProcessInformationSize 1024 * 1024 * 2
+#define BYTE CHAR 
+#define DWORD ULONG
 
 //0x10 bytes (sizeof)
 union _KIDTENTRY64
@@ -45,6 +47,12 @@ typedef struct _SSDT_ENTRY
 	DWORD32 SyscallNumber;	// Will serve as the index in the SSDT
 	DWORD32 SSDTValue;		// The SSDT value in the relative SCN
 } SSDT_ENTRY, *PSSDT_ENTRY;
+
+typedef struct _KERNEL_INFO
+{
+	PVOID KernelBaseAddress;
+	SIZE_T Size;
+} KERNEL_INFO, *PKERNEL_INFO;
 
 typedef enum _SYSTEM_INFORMATION_CLASS
 {

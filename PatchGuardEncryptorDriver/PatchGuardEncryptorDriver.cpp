@@ -11,17 +11,27 @@
 #pragma warning(disable: 4996)	// Disable specific warning
 #pragma warning(disable: 6066)	// Disable specific warning
 #pragma warning(disable: 4018)	// Disable specific warning
+#pragma warning(disable: 4838)	// Disable specific warning
+#pragma warning(disable: 4309)	// Disable specific warning
 
 // Booleans that are used in each Enumerate (IDT,SSDT, MSRs) functions to determine first run and VMX state
 BOOLEAN g_IsInitial_IDT = TRUE;
 BOOLEAN g_IsInitial_MSRs = TRUE;
+BOOLEAN g_IsInitialSSDT = TRUE;
+
 BOOLEAN g_CR4_VMXE_Enabled = FALSE;
 
 PIDT_ENTRY	g_InitialIDTEntries;
 PMSR_ENTRY	g_InitialMSRs;
-PSSDT_ENTRY g_InitialSSDT;
+PSSDT_ENTRY g_InitialSSDTEntries;
+PKERNEL_INFO g_KernelInfo;
 ULONG_PTR	g_SystemInformation;
 DWORD32		g_MaxVectorNumber = 0;
+DWORD32		g_Number_Of_SSDT_Entries = 0;
+PVOID		g_KiServiceTableAddress;
+
+//BYTE KiServiceTableOpCodes[] = {0xF0, 0x87, 0x26, 0x00, 0x00, 0x50, 0x27, 0x00};
+BYTE KiServiceTableOpCodes[] = {0x60, 0x41,0x32, 0x00, 0xF0, 0xA4, 0x43, 0x00 };
 
 // Global Timer objects for each Patch Guard check
 KTIMER TimerIDT;
@@ -60,13 +70,25 @@ VOID UnloadRoutine(PDRIVER_OBJECT DriverObject)
 	if(g_InitialIDTEntries)
 	{
 		ExFreePool(g_InitialIDTEntries);
-		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully released Allocted IDT Entries copy allocated from non paged pool!\n"));
+		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated IDT_ENTRY entries copy allocated from non paged pool!\n"));
 	}
 
 	if(g_InitialMSRs)
 	{
 		ExFreePool(g_InitialMSRs);
-		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully released Allocted MSR_ENTRY Entries allocated from non paged pool!\n"));
+		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated MSR_ENTRY Entries allocated from non paged pool!\n"));
+	}
+
+	if(g_KernelInfo)
+	{
+		ExFreePool(g_KernelInfo);
+		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated KERNEL_INFO structure allocated from non-paged pool!\n"));
+	}
+
+	if(g_InitialSSDTEntries)
+	{
+		ExFreePool(g_InitialSSDTEntries);
+		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated SSDT_ENTRY entries allocated from non-paged pool!\n"));
 	}
 
 	// Cancelling the PatchGuardEncryptorDriver timers - if it's already cancelled/unset, then nothing will happen
@@ -86,45 +108,6 @@ VOID UnloadRoutine(PDRIVER_OBJECT DriverObject)
 		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: SSDT Timer was not active.\n"));
 
 	KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: Driver unloaded successfully!\n"));
-}
-
-PVOID GetNtosBaseAddress()
-{
-	NTSTATUS status = STATUS_SUCCESS;
-	UNICODE_STRING NtQuerySystemInformationName = RTL_CONSTANT_STRING(L"NtQuerySystemInformation");
-	typedef NTSTATUS (NTAPI * fNtQuerySytsemInformation)(SYSTEM_INFORMATION_CLASS SystemInformationClass,
-		PVOID SystemInformation,
-		ULONG SystemInformationLength,
-		PULONG ReturnLength
-		);
-
-	fNtQuerySytsemInformation NtQuerySystemInformation = (fNtQuerySytsemInformation)MmGetSystemRoutineAddress(&NtQuerySystemInformationName);
-	PVOID DummyMemory = ExAllocatePool(NonPagedPool, 1);
-	if(!DummyMemory)
-	{
-		KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate DummyMemory!\n"));
-		return 0;
-	}
-	ULONG ReturnLength;
-	status = NtQuerySystemInformation(SystemModuleInformation, DummyMemory, 1, &ReturnLength);
-	if(status == STATUS_INFO_LENGTH_MISMATCH)
-	{
-
-		PSYSTEM_MODULE_INFORMATION ModuleInformationMemory = (PSYSTEM_MODULE_INFORMATION)ExAllocatePool(NonPagedPool, ReturnLength);
-		if (!ModuleInformationMemory) {
-			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate ModuleInformationMemory\n"));
-			return 0;
-		}
-		status = NtQuerySystemInformation(SystemModuleInformation, ModuleInformationMemory, ReturnLength, nullptr);
-		if(!NT_SUCCESS(status))
-		{
-			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: NtQuerySystemInformation failed with: 0x%x\n", status));
-			return 0;
-		}
-		PVOID NtosBase = ModuleInformationMemory->Modules[0].ImageBase;
-		return NtosBase;
-	}
-	return 0;
 }
 
 VOID NTAPI EnumerateIDT()
@@ -200,12 +183,136 @@ VOID NTAPI EnumerateIDT()
 				//KeBugCheckEx(CRITICAL_STRUCTURE_CORRUPTION, 0, 0, 0, 0x2); // 0x2 = A processor interrupt dispatch table (IDT)
 	
 				//For testing purposes, instead of bugcheck, we'll use KdPrint() to print that a modification was detected
-				KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: IDT DPC detected a change in Vector: 0x%x\n", i));
+				KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: detected a change in Vector: 0x%x\n", i));
 				break;
 			}
 			KdPrint(("[*] PatchGuardEncryptor: Vector 0x%x is verified\n", i));
 		}
 	}
+}
+
+VOID GetNtosBaseAddress()
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	UNICODE_STRING NtQuerySystemInformationName = RTL_CONSTANT_STRING(L"NtQuerySystemInformation");
+	typedef NTSTATUS(NTAPI* fNtQuerySytsemInformation)(SYSTEM_INFORMATION_CLASS SystemInformationClass,
+		PVOID SystemInformation,
+		ULONG SystemInformationLength,
+		PULONG ReturnLength
+		);
+
+	fNtQuerySytsemInformation NtQuerySystemInformation = (fNtQuerySytsemInformation)MmGetSystemRoutineAddress(&NtQuerySystemInformationName);
+	PVOID DummyMemory = ExAllocatePool(NonPagedPool, 1);
+	if (!DummyMemory)
+	{
+		KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate DummyMemory!\n"));
+		return;
+	}
+	ULONG ReturnLength;
+	status = NtQuerySystemInformation(SystemModuleInformation, DummyMemory, 1, &ReturnLength);
+	if (status == STATUS_INFO_LENGTH_MISMATCH)
+	{
+
+		PSYSTEM_MODULE_INFORMATION ModuleInformationMemory = (PSYSTEM_MODULE_INFORMATION)ExAllocatePool(NonPagedPool, ReturnLength);
+		if (!ModuleInformationMemory) {
+			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: Unable to allocate ModuleInformationMemory\n"));
+			return;
+		}
+		status = NtQuerySystemInformation(SystemModuleInformation, ModuleInformationMemory, ReturnLength, nullptr);
+		if (!NT_SUCCESS(status))
+		{
+			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: NtQuerySystemInformation failed with: 0x%x\n", status));
+			return;
+		}
+		g_KernelInfo->KernelBaseAddress = ModuleInformationMemory->Modules[0].ImageBase;
+		g_KernelInfo->Size = ModuleInformationMemory->Modules[0].ImageSize;
+		
+	}
+}
+
+PVOID GetKiServiceTableBaseAddress()
+{
+	/*
+		This function is responsible to dynamically resolve the base address of the nt!KiServiceTable,
+		which is the SSDT base address through checking a set of opcodes as a pattern used to dynamically
+		deteremine the base address of nt!KiServiceTable.
+	*/
+
+	GetNtosBaseAddress(); // should fill the g_KernelInfo data structure with kernel base address and size
+
+	KdPrint(("Ntoskrnl base address: 0x%p\n", g_KernelInfo->KernelBaseAddress));
+	KdPrint(("Ntoskrnl size: %d bytes\n", g_KernelInfo->Size));
+
+	if(g_KernelInfo->KernelBaseAddress && g_KernelInfo->Size)
+	{
+		ULONG_PTR BaseAddress = (ULONG_PTR)g_KernelInfo->KernelBaseAddress;
+		int internal_counter = 0;
+		for (int i = 0; i < g_KernelInfo->Size; i++)
+		{
+			CHAR CurrentOpCode = *(CHAR*)((CHAR*)BaseAddress + i);
+			if (CurrentOpCode == KiServiceTableOpCodes[0])
+			{
+				for(int j = i; j < i+sizeof(KiServiceTableOpCodes); j++)
+				{
+					if(*(CHAR*)((CHAR*)BaseAddress + j) != KiServiceTableOpCodes[internal_counter])
+					{
+						internal_counter = 0;
+						break;
+					}
+
+					internal_counter++;
+				}
+
+				if(internal_counter == sizeof(KiServiceTableOpCodes))
+				{
+					KdPrint(("[*] PatchGuardEncryptorDriver::GetKiServiceTableBaseAddress: nt!KiServiceTable Base Address: 0x%p\n", (PVOID)(BaseAddress + i)));
+					return (PVOID)(BaseAddress + i);
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+VOID FillNumberOfSSDTEntries()
+{
+	/*
+		The function will fill g_Number_Of_SSDT_Entries global variable with the number of SSDT enrties available on the system
+		by dynamically resolving it through iterating over the SSDT.
+	*/
+
+	if (!g_KernelInfo->KernelBaseAddress)
+	{
+		GetNtosBaseAddress();
+	}
+	if(!g_KiServiceTableAddress)
+	{
+		//The KiServiceTable offset is currently hardcoded for testing purposes
+		g_KiServiceTableAddress = (PVOID)(((ULONG_PTR)g_KernelInfo->KernelBaseAddress) + 0xd4270);
+		KdPrint(("nt!KiServiceTable address: 0x%p\n", g_KiServiceTableAddress));
+	}
+	ULONG_PTR CurrentSSDTEntry = (ULONG_PTR)g_KiServiceTableAddress;
+
+	int limiter = 300;
+	while(*(DWORD*)CurrentSSDTEntry || limiter--)
+	{
+		// I made some bitwise operations that determines if the currently iterated DWORD
+		// is a valid SSDT entry. I created it through researching how a SSDT entry is constructed  
+		// and found a common base that each valid SSDT entry won't have
+		if (((*(DWORD*)CurrentSSDTEntry) == 00000000)					// Checking if the currently iterated SSDT entry is 0
+			|| (((*(DWORD*)CurrentSSDTEntry) & 0xff000000) == 00000000) // Checking if the first byte in the currently iterated SSDT is 00
+			|| (((*(DWORD*)CurrentSSDTEntry) & 0xfffff000) == 00000000) // Checking if only the last 12 bits in the currently iterated SSDT are set
+			|| (((*(DWORD*)CurrentSSDTEntry) ^ 0xff000000) == 0))		// checking if first byte in the currently iterated SSDT entry is bigger than 0x0f
+		{
+			break;
+		}
+
+		CurrentSSDTEntry += sizeof(DWORD);
+		g_Number_Of_SSDT_Entries++;
+	}
+	KdPrint(("[*] PatchGuardEncryptorDriver::FillNumberOfSSDTEntries: Number of SSDT entries found: %d\n", g_Number_Of_SSDT_Entries));
+
 }
 
 VOID EnumerateSSDT() 
@@ -230,6 +337,55 @@ VOID EnumerateSSDT()
 		A for loop will iterate over each current value in the SSDT, and will dynamically compare the relative value with
 		the current SSDT entry value, if it fails, a BSOD will be invoked!
 	*/
+
+	if(g_IsInitialSSDT)
+	{
+		g_IsInitialSSDT = FALSE;
+		if (!g_InitialSSDTEntries)
+		{
+			KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: g_InitialSSDTEntries is not allocated, returning...\n"));
+			return;
+		}
+
+		//g_KiServiceTableAddress = GetKiServiceTableBaseAddress(); // This will fill the g_KiServiceTableAddress with nt!KiServiceTable base address
+		g_KiServiceTableAddress = (PVOID)(((ULONG_PTR)g_KernelInfo->KernelBaseAddress) + 0xd4270); // hardcoded offset for testing purposes
+		
+		//FillNumberOfSSDTEntries();
+		//
+		//if(!g_Number_Of_SSDT_Entries)
+		//{
+		//	KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: g_Number_Of_SSDT_Entries is %d!\n", g_Number_Of_SSDT_Entries));
+		//	return;
+		//}
+
+		KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: Number of SSDT entries found: %d!\n", g_Number_Of_SSDT_Entries));
+		
+		ULONG_PTR LocalKiServiceTableAddress = (ULONG_PTR)g_KiServiceTableAddress;
+		DWORD CurrentSSDTEntry;
+		for (int i = 0; i < g_Number_Of_SSDT_Entries; i++)
+		{
+			CurrentSSDTEntry = *(DWORD*)((BYTE*)LocalKiServiceTableAddress + (i * sizeof(DWORD)));
+			g_InitialSSDTEntries[i].SyscallNumber = i; // since a syscall number is an index in the SSDT table, i is the SCN
+			g_InitialSSDTEntries[i].SSDTValue = *(DWORD*)((BYTE*)LocalKiServiceTableAddress + (i * sizeof(DWORD)));
+		}
+		return;
+	}
+
+	ULONG_PTR LocalKiServiceTableAddress = (ULONG_PTR)g_KiServiceTableAddress;
+	for (int i = 0; i < g_Number_Of_SSDT_Entries; i++)
+	{
+		ULONG_PTR CurrentSSDTEntryPointer = (ULONG_PTR)(((BYTE*)LocalKiServiceTableAddress) + (i * sizeof(DWORD)));
+
+		//if (g_InitialSSDTEntries[i].SSDTValue != *(DWORD*)((BYTE*)LocalKiServiceTableAddress + (i * sizeof(DWORD))))
+		if (g_InitialSSDTEntries[i].SSDTValue != *(DWORD*)CurrentSSDTEntryPointer)
+		{
+			KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: Original SSDT entry value: 0x%x at 0x%p was changed to: 0x%x!!\n", g_InitialSSDTEntries[i].SSDTValue, CurrentSSDTEntryPointer, *(DWORD*)CurrentSSDTEntryPointer));
+			continue;
+		}
+		//KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: SSDT Entry[%d]: Original SSDT Entry Value = 0x%x | Current SSDT Entry value: 0x%x are verified!\n", i, g_InitialSSDTEntries[i].SSDTValue, *(DWORD*)CurrentSSDTEntryPointer));
+		KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: SSDT Entry at %d is valid and has the original value of 0x%x\n", i, g_InitialSSDTEntries[i].SSDTValue));
+	}
+
 }
 
 VOID EnumerateMSRs()
@@ -320,7 +476,8 @@ VOID EnumerateMSRs()
 			g_InitialMSRs[21].MSRIndex = MSR_SYSCALL_MASK;
 			g_InitialMSRs[21].MSRValue = __readmsr(MSR_SYSCALL_MASK);
 
-			KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=1 -> successfully filled g_InitialMSRs at base address: 0x%p\n", g_InitialMSRs));
+			KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=1\n"));
+			KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: successfully filled g_InitialMSRs at base address : 0x%p\n", g_InitialMSRs));
 			return;
 		}
 
@@ -351,7 +508,9 @@ VOID EnumerateMSRs()
 		g_InitialMSRs[8].MSRIndex = MSR_SYSCALL_MASK;
 		g_InitialMSRs[8].MSRValue = __readmsr(MSR_SYSCALL_MASK);
 
-		KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=0 successfully filled g_InitialMSRs at base address: 0x%p\n", g_InitialMSRs));
+		KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: CR4.VMXE=0\n"));
+		KdPrint(("[*] PatchGuardEncryptor::EnumerateMSR: successfully filled g_InitialMSRs at base address : 0x%p\n", g_InitialMSRs));
+
 		return;
 	}
 
@@ -577,6 +736,12 @@ VOID DPCMSRs(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID Syst
 {
 	NT_ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
+	/*
+	 Increases IRQL to HIGH_LEVEL (0xF) to avoid potential evasion from an attacker when overriding a function pointer
+	 with a malicious function pointer that automatically increases the IRQL to HIGH_LEVEL and prevent the timer DPC from being invoked.
+	 Since working in a HIGH_LEVEL IRQL is an expensive operation, it must to be minimal and effective.
+	*/
+
 	KIRQL CurrentIrql;
 	KeRaiseIrql(HIGH_LEVEL, &CurrentIrql);
 
@@ -587,11 +752,36 @@ VOID DPCMSRs(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID Syst
 
 }
 
-void * __cdecl operator new(size_t size, DWORD32 NumberOfAllocations, POOL_FLAGS PoolFlags, ULONG tag)
+VOID DPCSSDT(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2)
 {
-	return ExAllocatePool2(PoolFlags, size*NumberOfAllocations, tag);
+	NT_ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+	/*
+	 Increases IRQL to HIGH_LEVEL (0xF) to avoid potential evasion from an attacker when overriding a function pointer
+	 with a malicious function pointer that automatically increases the IRQL to HIGH_LEVEL and prevent the timer DPC from being invoked.
+	 Since working in a HIGH_LEVEL IRQL is an expensive operation, it must to be minimal and effective.
+	*/
+
+	KIRQL CurrentIrql;
+	KeRaiseIrql(HIGH_LEVEL, &CurrentIrql);
+
+	KdPrint(("[*] PatchGuardEncryptorDriver::DPC_SSDT: SSDT DPC is invoked, Current IRQL: %d\n", KeGetCurrentIrql()));
+	EnumerateSSDT();
+
+	KeLowerIrql(CurrentIrql);
 }
 
+// new operator overloading
+void * __cdecl operator new(size_t size, DWORD32 NumberOfAllocations, POOL_TYPE PoolType) 
+{
+	return ExAllocatePool(PoolType, NumberOfAllocations*size);
+}
+
+// delete operator overloading
+void __cdecl operator delete(void *p, size_t)
+{
+	ExFreePool(p);
+}
 
 extern "C"
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -622,16 +812,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	DriverObject->MajorFunction[IRP_MJ_CLOSE] = CreateClose;
 	DriverObject->DriverUnload = UnloadRoutine;
 
+	//g_InitialIDTEntries = new(256, NonPagedPool)IDT_ENTRY;
+	
 	g_InitialIDTEntries = (PIDT_ENTRY)ExAllocatePool(NonPagedPool, sizeof(IDT_ENTRY) * 256);
 	if(!g_InitialIDTEntries)
 	{
 		KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Failed allocating g_InitialIDTEntries with ExAllocatePool()!\n"));
 		status = STATUS_INSUFFICIENT_RESOURCES;
-		//IoDeleteDevice(DeviceObject);
-		if (!NT_SUCCESS(IoDeleteSymbolicLink(&DeviceSymlink)))
-		{
-			KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Unable to Delete symbolic Link!\n"));
-		}
+		UnloadRoutine(DriverObject);
 
 		return status;
 	}
@@ -643,41 +831,76 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	{
 		KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Failed allocating g_InitialMSRs with ExAllocatePool()!\n"));
 		status = STATUS_INSUFFICIENT_RESOURCES;
-		//IoDeleteDevice(DeviceObject);
-		if (!NT_SUCCESS(IoDeleteSymbolicLink(&DeviceSymlink)))
-		{
-			KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Unable to Delete symbolic Link!\n"));
-		}
-
+		UnloadRoutine(DriverObject);
 		return status;
 	}
 
 	KdPrint(("Allocated an array in non-paged pool of 256 MSR_ENTRY structures at address: 0x%p\n", g_InitialMSRs));
 
+	g_KernelInfo = (PKERNEL_INFO)ExAllocatePool(NonPagedPool, sizeof(KERNEL_INFO));
+	if (!g_KernelInfo)
+	{
+		KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Failed allocating g_KernelInfo with ExAllocatePool()!\n"));
+		status = STATUS_INSUFFICIENT_RESOURCES;
+		UnloadRoutine(DriverObject);
+		return status;
+	}
+	
+	FillNumberOfSSDTEntries();
+	if (!g_Number_Of_SSDT_Entries)	// if the number of SSDT entries returned from FillNumberOfSSDTEntries() is 0...
+	{
+		KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: g_Number_Of_SSDT_Entries is not allocated, returning...\n"));
+		UnloadRoutine(DriverObject);
+		return STATUS_BAD_DATA;
+	}
+	
+	g_InitialSSDTEntries = (PSSDT_ENTRY)ExAllocatePool(NonPagedPool, g_Number_Of_SSDT_Entries * sizeof(SSDT_ENTRY));
+	if(!g_InitialSSDTEntries)
+	{
+		KdPrint(("[-] PatchGuardEncryptor::DriverEntry: Failed allocating g_InitialSSDTEntries with ExAllocatePool()!\n"));
+		status = STATUS_INSUFFICIENT_RESOURCES;
+		UnloadRoutine(DriverObject);
+		return status;
+	}
+
+	KdPrint(("Allocated an array in non-paged pool %d SSDT_ENTRY structures at address: 0x%p\n", g_Number_Of_SSDT_Entries, g_InitialSSDTEntries));
+
 	EnumerateIDT();		// Captures the initial state of the Interrupt Dispatch Table when the driver is being loaded into kernel space.
 	EnumerateMSRs();	// Captures the initial state of MSR registers when the driver is being loaded into kernel space.
-	
+	EnumerateSSDT();	// Captures the initial state of the SSDT when the driver is being loaded into kernel space.
+
 	LARGE_INTEGER DueTime;
 	DueTime.QuadPart = -3 * 10 * 1000 * 1000;	// 3 seconds
 	LONG Period = 2 * 1000;						// 2 seconds interval
 
 	// Allocating IDT, MSRs and SSDT timers using KeInitializeTimerEx()
-	KeInitializeTimerEx(&TimerIDT, NotificationTimer);			// NotificationTimer makes the timer periodic
+	KeInitializeTimerEx(&TimerIDT,  NotificationTimer);			// NotificationTimer makes the timer periodic
 	KeInitializeTimerEx(&TimerMSRs, NotificationTimer);			// NotificationTimer makes the timer periodic
+	KeInitializeTimerEx(&TimerSSDT, NotificationTimer);			// NotificationTimer makes the timer periodic
 
 
 	// Initializing the IDT, MSR and SSDT DPCs with their relevant DPC routines
 	KeInitializeDpc(&DPC_IDT, (PKDEFERRED_ROUTINE)DPCInterruptDispatchTable, nullptr);
 	KeInitializeDpc(&DPC_MSRs, (PKDEFERRED_ROUTINE)DPCMSRs, nullptr);
+	KeInitializeDpc(&DPC_SSDT, (PKDEFERRED_ROUTINE)DPCSSDT, nullptr);
 
 
 	// Setting the timer with a certain Period, DueTime, and their DPCs
 	KeSetTimerEx(&TimerIDT, DueTime, Period, &DPC_IDT);
 	KeSetTimerEx(&TimerMSRs, DueTime, Period, &DPC_MSRs);
+	KeSetTimerEx(&TimerSSDT, DueTime, Period, &DPC_SSDT);
 
+	/*
+		it's possible to dynamically get the address of exported kernel variables (yes, variables not only functions)
+		using the MmGetSystemRoutineAddress() kernel function.
 
-	// Will be used for the Anti-Remote Kernel debugger (implemented by checking the nt!KdDebuggerEnabled global variable)
-	KdPrint(("Ntoskrnl base address: 0x%p\n", GetNtosBaseAddress())); 
+		The KdDebuggerEnabled variable, is global exported kernel variable, which means that it's possible to 
+		dynamically resolve the address of it using the MmGetSystemRoutineAddress() as done below:
+	*/
+
+	//UNICODE_STRING KdDebuggerEnabledName = RTL_CONSTANT_STRING(L"KdDebuggerEnabled");
+	//PVOID KdDebuggerEnabledAddress = MmGetSystemRoutineAddress(&KdDebuggerEnabledName);
+	//KdPrint(("[*] PatchGuardEncryptorDriver: nt!KdDebuggerEnabled global kernel variable at address: 0x%p\n", KdDebuggerEnabledAddress));
 
 	return status;
 }
