@@ -22,12 +22,18 @@
     <ClCompile Include="PatchGuardEncryptorDriver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="IntegrityChecker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Helper.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="MSRs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="IntegrityChecker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

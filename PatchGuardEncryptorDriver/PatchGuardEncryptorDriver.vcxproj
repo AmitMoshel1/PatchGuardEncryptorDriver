@@ -93,10 +93,12 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="IntegrityChecker.cpp" />
     <ClCompile Include="PatchGuardEncryptorDriver.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Helper.h" />
+    <ClInclude Include="IntegrityChecker.h" />
     <ClInclude Include="MSRs.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

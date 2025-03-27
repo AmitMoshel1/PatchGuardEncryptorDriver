@@ -8,56 +8,66 @@
 //0x10 bytes (sizeof)
 union _KIDTENTRY64
 {
-    struct
-    {
-        USHORT OffsetLow;                                                   //0x0
-        USHORT Selector;                                                    //0x2
-    };
-    USHORT IstIndex : 3;                                                    //0x4
-    USHORT Reserved0 : 5;                                                   //0x4
-    USHORT Type : 5;                                                        //0x4
-    USHORT Dpl : 2;                                                         //0x4
-    struct
-    {
-        USHORT Present : 1;                                                 //0x4
-        USHORT OffsetMiddle;                                                //0x6
-    };
-    struct
-    {
-        ULONG OffsetHigh;                                                   //0x8
-        ULONG Reserved1;                                                    //0xc
-    };
-    ULONGLONG Alignment;                                                    //0x0
+	struct
+	{
+		USHORT OffsetLow;                                                   //0x0
+		USHORT Selector;                                                    //0x2
+	};
+	USHORT IstIndex : 3;                                                    //0x4
+	USHORT Reserved0 : 5;                                                   //0x4
+	USHORT Type : 5;                                                        //0x4
+	USHORT Dpl : 2;                                                         //0x4
+	struct
+	{
+		USHORT Present : 1;                                                 //0x4
+		USHORT OffsetMiddle;                                                //0x6
+	};
+	struct
+	{
+		ULONG OffsetHigh;                                                   //0x8
+		ULONG Reserved1;                                                    //0xc
+	};
+	ULONGLONG Alignment;                                                    //0x0
 };
 
 typedef struct _IDT_ENTRY
 {
-    DWORD32 Vector;			// The vector number of the relative interrupt in the IDT
-    PVOID ServiceRoutine;	// The kernel address of the service routine
-} IDT_ENTRY, *PIDT_ENTRY;
+	DWORD32 Vector;			// The vector number of the relative interrupt in the IDT
+	PVOID ServiceRoutine;	// The kernel address of the service routine
+} IDT_ENTRY, * PIDT_ENTRY;
 
 typedef struct _MSR_ENTRY
 {
-    DWORD32 MSRIndex;		// The MSR Index (i.e 0xC0000082)
-    ULONG_PTR MSRValue;		// The inital value within the relative MSR register
-} MSR_ENTRY, *PMSR_ENTRY;
+	DWORD32 MSRIndex;		// The MSR Index (i.e 0xC0000082)
+	ULONG_PTR MSRValue;		// The inital value within the relative MSR register
+} MSR_ENTRY, * PMSR_ENTRY;
 
 typedef struct _SSDT_ENTRY
 {
 	DWORD32 SyscallNumber;	// Will serve as the index in the SSDT
 	DWORD32 SSDTValue;		// The SSDT value in the relative SCN
-} SSDT_ENTRY, *PSSDT_ENTRY;
+} SSDT_ENTRY, * PSSDT_ENTRY;
 
 typedef struct _KERNEL_INFO
 {
 	PVOID KernelBaseAddress;
 	SIZE_T Size;
-} KERNEL_INFO, *PKERNEL_INFO;
+} KERNEL_INFO, * PKERNEL_INFO;
+
+// The _TIMER_INFO structure will hold the address of the _KTIMER object and it's relative pointer to _KDPC
+// This will be declared as a global variable, and will be initialized in the DriverEntry()
+// This structure will be mainly used in the IntegrityChecker 
+typedef struct _TIMER_INFO
+{
+	PKTIMER Timer;				// Holds the pointer to the _KTIMER object
+	PKDPC Dpc;					// Holds the relevant pointer to the _KDPC object associated with the timer
+	PVOID DeferredRoutine;		// Holds the relevant function pointer of the Deferred Routine initialized with the DPC
+} TIMER_INFO, * PTIMER_INFO;
 
 typedef enum _SYSTEM_INFORMATION_CLASS
 {
 	SystemBasicInformation = 0,
-	SystemProcessorInformation = 1,           
+	SystemProcessorInformation = 1,
 	SystemPerformanceInformation = 2,
 	SystemTimeOfDayInformation = 3,
 	SystemPathInformation = 4,
@@ -160,6 +170,3 @@ typedef struct _SYSTEM_MODULE_INFORMATION {
 	ULONG ModuleCount;
 	SYSTEM_MODULE Modules[1];
 } SYSTEM_MODULE_INFORMATION, * PSYSTEM_MODULE_INFORMATION;
-
-
-
