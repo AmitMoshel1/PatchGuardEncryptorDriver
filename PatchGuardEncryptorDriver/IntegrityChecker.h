@@ -28,12 +28,10 @@ struct IntegrityCheck
 	static BOOLEAN TimerChecker(PKTIMER TimerObjectPointer, PTIMER_INFO TimerInfo);
 	VOID InitializeDPC(PKTIMER Timer, PKDPC Dpc, PVOID DeferredRoutine, PVOID DeferredContext);
 	static VOID DPCIntegrityCheckIDT(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
+	static VOID DPCIntegrityCheckSSDT(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
+	static VOID DPCIntegrityCheckMSRs(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
 
 	static ULONG_PTR CalculateTimerDPCValue(PKDPC Dpc,  PKTIMER KTimer);
-
-	//VOID DPCIntegrityCheckSSDT(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
-	//VOID DPCIntegrityCheckMSR(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
-
 
 	KTIMER TimerVerifierSSDT;
 	KTIMER TimerVerifierIDT;

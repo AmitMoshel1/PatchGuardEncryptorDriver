@@ -25,7 +25,10 @@ BOOLEAN g_CR4_VMXE_Enabled = FALSE;
 PIDT_ENTRY	g_InitialIDTEntries;
 PMSR_ENTRY	g_InitialMSRs;
 PSSDT_ENTRY g_InitialSSDTEntries;
+
 extern "C" PKERNEL_INFO g_KernelInfo;
+//extern "C" ULONG_PTR g_KernelBaseAddress;
+
 PTIMER_INFO g_TimerInfoArray;
 ULONG_PTR	g_SystemInformation;
 DWORD32		g_MaxVectorNumber = 0;
@@ -117,9 +120,9 @@ VOID UnloadRoutine(PDRIVER_OBJECT DriverObject)
 	else
 		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: SSDT Timer was not active.\n"));
 
-	if (g_Verifier) {
-		delete g_Verifier;
-	}
+	//if (g_Verifier) {
+	delete g_Verifier;
+	//}
 
 	KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: Driver unloaded successfully!\n"));
 }
@@ -238,6 +241,7 @@ extern "C" VOID GetNtosBaseAddress()
 			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: NtQuerySystemInformation failed with: 0x%x\n", status));
 			return;
 		}
+		//g_KernelBaseAddress = (ULONG_PTR)ModuleInformationMemory->Modules[0].ImageBase;
 		g_KernelInfo->KernelBaseAddress = ModuleInformationMemory->Modules[0].ImageBase;
 		g_KernelInfo->Size = ModuleInformationMemory->Modules[0].ImageSize;
 
@@ -300,12 +304,14 @@ VOID FillNumberOfSSDTEntries()
 	{
 		GetNtosBaseAddress();
 	}
+
 	if (!g_KiServiceTableAddress)
 	{
 		//The KiServiceTable offset is currently hardcoded for testing purposes
 		g_KiServiceTableAddress = (PVOID)(((ULONG_PTR)g_KernelInfo->KernelBaseAddress) + 0xd4270);
 		KdPrint(("nt!KiServiceTable address: 0x%p\n", g_KiServiceTableAddress));
 	}
+
 	ULONG_PTR CurrentSSDTEntry = (ULONG_PTR)g_KiServiceTableAddress;
 
 	int limiter = 300;
@@ -927,9 +933,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
 	// When it's currently being invoked, successfully loads and unloads for the first time
 	// When attempting to load the driver for the second time, we get a BSOD
+	
 	g_Verifier = new(1, NonPagedPool)IntegrityCheck(g_TimerInfoArray);
-
-
+		
 	/*
 		it's possible to dynamically get the address of exported kernel variables (yes, variables not only functions)
 		using the MmGetSystemRoutineAddress() kernel function.
@@ -937,7 +943,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		The KdDebuggerEnabled variable, is global exported kernel variable, which means that it's possible to
 		dynamically resolve the address of it using the MmGetSystemRoutineAddress() as done below:
 	*/
-
 	//UNICODE_STRING KdDebuggerEnabledName = RTL_CONSTANT_STRING(L"KdDebuggerEnabled");
 	//PVOID KdDebuggerEnabledAddress = MmGetSystemRoutineAddress(&KdDebuggerEnabledName);
 	//KdPrint(("[*] PatchGuardEncryptorDriver: nt!KdDebuggerEnabled global kernel variable at address: 0x%p\n", KdDebuggerEnabledAddress));

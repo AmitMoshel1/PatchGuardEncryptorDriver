@@ -83,6 +83,9 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
     </ClCompile>
+    <Link>
+      <AdditionalOptions>/IGNORE:4210 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <DriverSign>
