@@ -12,20 +12,8 @@
 #pragma warning(disable: 4838)	// Disable specific warning
 #pragma warning(disable: 4309)	// Disable specific warning
 
-//// new operator overloading
-//void* __cdecl operator new(size_t size, DWORD32 NumberOfAllocations, POOL_TYPE PoolType)
-//{
-//	return ExAllocatePool(PoolType, NumberOfAllocations * size);
-//}
-//
-//// delete operator overloading
-//void __cdecl operator delete(void* p, size_t)
-//{
-//	ExFreePool(p);
-//}
-
 extern "C" PKERNEL_INFO g_KernelInfo = nullptr;
-//extern "C" ULONG_PTR g_KernelBaseAddress = NULL;
+
 
 IntegrityCheck::IntegrityCheck(PTIMER_INFO TimerInfoArr) : TimerInfoArray(TimerInfoArr)
 {
@@ -34,15 +22,11 @@ IntegrityCheck::IntegrityCheck(PTIMER_INFO TimerInfoArr) : TimerInfoArray(TimerI
 	KeInitializeTimerEx(&TimerVerifierIDT, NotificationTimer);
 	KdPrint(("IntegrityCheck::IntegrityCheck() IDT Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierIDT)));
 
-
-	//KeInitializeTimerEx(&TimerVerifierSSDT, NotificationTimer);
-	//KdPrint(("IntegrityCheck::IntegrityCheck() SSDT Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierSSDT)));
+	KeInitializeTimerEx(&TimerVerifierSSDT, NotificationTimer);
+	KdPrint(("IntegrityCheck::IntegrityCheck() SSDT Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierSSDT)));
 	
-	//KeInitializeTimerEx(&TimerVerifierMSR, NotificationTimer);
-	//KdPrint(("IntegrityCheck::IntegrityCheck() MSR Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierMSR)));
-
-	
-	//g_DefferedContext = new(3, NonPagedPool)DeferredContextDPC; 
+	KeInitializeTimerEx(&TimerVerifierMSR, NotificationTimer);
+	KdPrint(("IntegrityCheck::IntegrityCheck() MSR Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierMSR)));
 
 	// 3 is the Number of times to allocate the DeferredContextDPC structure in non-paged pool,
 	// since we have 3 "IntegrityCheck" timers for each mechanism (IDT, SSDT, MSRs), we'll allocate 3 structures.
@@ -68,26 +52,28 @@ IntegrityCheck::IntegrityCheck(PTIMER_INFO TimerInfoArr) : TimerInfoArray(TimerI
 
 	KdPrint(("[*] g_DefferedContext allocated at address: 0x%p\n", g_DefferedContext));
 
+	// Initializing DPC for the IDT Timer Integrity Check Verifier
 	InitializeDPC(&TimerVerifierIDT,
 		&DPCVerifierIDT,
 		&DPCIntegrityCheckIDT,
 		(PVOID)&g_DefferedContext[0]);
 
-	/*InitializeDPC(&TimerVerifierSSDT,
+	// Initializing DPC for the SSDT Timer Integrity Check Verifier
+	InitializeDPC(&TimerVerifierSSDT,
 		&DPCVerifierSSDT,
 		&DPCIntegrityCheckSSDT,
-		(PVOID)&g_DefferedContext[1]);*/
+		(PVOID)&g_DefferedContext[1]);
 
-	//IntegrityCheck::InitializeDPC();
-	//IntegrityCheck::InitializeDPC();
-
+	// Initializing DPC for the MSR Timer Integrity Check Verifier
+	InitializeDPC(&TimerVerifierMSR,
+		&DPCVerifierMSR,
+		&DPCIntegrityCheckMSRs,
+		(PVOID)&g_DefferedContext[2]);
 }
 
 
 BOOLEAN IntegrityCheck::CancelVerifierTimer(PKTIMER Timer)
 {
-	/*BOOLEAN b = KeCancelTimer(&Timer);
-	KdPrint(("IntegrityCheck::CancelVerifierTimer: verifier _KTIMER located at kernel address: 0x%p was cancelled succesfully!\n", &Timer));*/
 	return KeCancelTimer(Timer);;
 }
 
@@ -107,7 +93,6 @@ static inline ULONG_PTR ROR8(ULONG_PTR value, BYTE shift)
 ULONG_PTR IntegrityCheck::CalculateTimerDPCValue(PKDPC Dpc, PKTIMER KTimer)
 {
 	ULONG_PTR KernelBaseAddress = (ULONG_PTR)g_KernelInfo->KernelBaseAddress;
-	//ULONG_PTR KernelBaseAddress = (ULONG_PTR)g_KernelBaseAddress;
 
 	// Offsets for nt!KiWaitAlways and nt!KiWaitNever (These offsets change between builds!!!)
 	ULONG_PTR KiWaitAlwaysAddress = KernelBaseAddress + 0x00fc5260;
@@ -126,29 +111,27 @@ ULONG_PTR IntegrityCheck::CalculateTimerDPCValue(PKDPC Dpc, PKTIMER KTimer)
 	return rotated ^ KiWaitNeverValue;
 }
 
-//BOOLEAN IntegrityCheck::TimerChecker(PKTIMER TimerObjectPointer, PTIMER_INFO TimerInfo)
 BOOLEAN IntegrityCheck::TimerChecker(PKTIMER TimerObjectPointer, PTIMER_INFO TimerInfo)
 {
 	// Verifying that the KTIMER's DPC wasn't manipulated 
-	// Wrong: IntegrityCheck::TimerChecker: KTIMER->Dpc structure pointer was manipulated:
-	// TimerInfo->Dpc: 0xFFFFF800210E7130 and TimerObjectPointer->Dpc: 0x4B3AE633466F0072 <-- Not correct!!
+
+	KdPrint(("[*] IntegrityCheck::TimerChecker: _KTIMER object being checked: 0x%p\n", TimerObjectPointer));
 
 	ULONG_PTR CalculatedDPCValue = CalculateTimerDPCValue(TimerInfo->Dpc, TimerInfo->Timer);
-	KdPrint(("CalculatedDPCValue received is: 0x%p\n", CalculatedDPCValue));
+	KdPrint(("[*] IntegrityCheck::TimerChecker: CalculatedDPCValue received is: 0x%p\n", CalculatedDPCValue));
 
 	if (CalculatedDPCValue != (ULONG_PTR)TimerObjectPointer->Dpc)
-	//if ((ULONG_PTR)TimerInfo->Dpc != (ULONG_PTR)TimerObjectPointer->Dpc)
 	{
 		KdPrint(("IntegrityCheck::TimerChecker: KTIMER->Dpc structure pointer was manipulated: TimerInfo->Dpc: 0x%p and TimerObjectPointer->Dpc: 0x%p\n", TimerInfo->Dpc, TimerObjectPointer->Dpc));
 		return FALSE;
 	}
 
 	// Verifying that the DPC's routine wasn't manipulated 
-	/*if (TimerInfo->DeferredRoutine != TimerObjectPointer->Dpc->DeferredRoutine)
+	if ((ULONG_PTR)TimerInfo->DeferredRoutine != (ULONG_PTR)TimerInfo->Dpc->DeferredRoutine)
 	{
-		KdPrint(("IntegrityCheck::TimerChecker: DPC's Routine was manipulated: TimerInfo->DeferredRoutine: 0x%p and TimerObjectPointer->Dpc->DeferredRoutine: 0x%p\n", TimerInfo->DeferredRoutine, TimerObjectPointer->Dpc->DeferredRoutine));
+		KdPrint(("IntegrityCheck::TimerChecker: DPC's Deferred Routine was manipulated: Original DeferredRoutine: 0x%p and Malicious Deferred Routine: 0x%p\n", TimerInfo->DeferredRoutine, TimerObjectPointer->Dpc->DeferredRoutine));
 		return FALSE;
-	}*/
+	}
 	return TRUE;
 }
 
@@ -191,11 +174,68 @@ VOID IntegrityCheck::DPCIntegrityCheckIDT(
 	PDeferredContextDPC DeferredStruct = (PDeferredContextDPC)DeferredContext;
 
 	KIRQL OldIrql;
-	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Rising IRQL to HIGH_LEVEL
+	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Raising IRQL to HIGH_LEVEL
 
 	if(!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
 	{
 		KdPrint(("IntegrityCheck::DPCIntegrityCheckIDT: PatchGuard's IDT Timer's DPC was manipulated!\n"));
+		KeLowerIrql(OldIrql);
+
+		//0xC7: TIMER_OR_DPC_INVALID 
+		/*KeBugCheckEx(TIMER_OR_DPC_INVALID,(ULONG_PTR)DeferredStruct->TimerInfo->Dpc,(ULONG_PTR)DeferredStruct->TimerObjectPointer,(ULONG_PTR)((ULONG_PTR)DeferredStruct->TimerObjectPointer+sizeof(_KTIMER)),0x1);*/
+		return;
+	}
+	KdPrint(("IntegrityCheck::DPCIntegrityCheckIDT: PatchGuard's IDT Timer's DPC is valid!\n"));
+
+	KeLowerIrql(OldIrql);
+}
+
+VOID IntegrityCheck::DPCIntegrityCheckSSDT(
+	PKDPC Dpc,
+	PVOID DeferredContext,		// PKTIMER TimerObjectPointer + PTIMER_INFO TimerInfo 
+	PVOID SystemArgument1,
+	PVOID SystemArgument2)
+{
+	KdPrint(("[*] IntegrityCheck::DPCIntegrityCheckSSDT Invoked!!\n"));
+	PDeferredContextDPC DeferredStruct = (PDeferredContextDPC)DeferredContext;
+
+	KIRQL OldIrql;
+	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Raising IRQL to HIGH_LEVEL
+
+	if (!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
+	{
+		KdPrint(("IntegrityCheck::DPCIntegrityCheckSSDT: PatchGuard's SSDT Timer's DPC was manipulated!\n"));
+		KeLowerIrql(OldIrql);
+
+		//0xC7: TIMER_OR_DPC_INVALID <- Will be used in production environment
+		/*KeBugCheckEx(
+			TIMER_OR_DPC_INVALID,
+			(ULONG_PTR)DeferredStruct->TimerInfo->Dpc,
+			(ULONG_PTR)DeferredStruct->TimerObjectPointer,
+			(ULONG_PTR)((ULONG_PTR)DeferredStruct->TimerObjectPointer+sizeof(_KTIMER)),
+			0x1);*/
+		return;
+	}
+	KdPrint(("IntegrityCheck::DPCIntegrityCheckSSDT: PatchGuard's SSDT Timer's DPC is valid!\n"));
+
+	KeLowerIrql(OldIrql);
+}
+
+VOID IntegrityCheck::DPCIntegrityCheckMSRs(
+	PKDPC Dpc,
+	PVOID DeferredContext,		// PKTIMER TimerObjectPointer + PTIMER_INFO TimerInfo 
+	PVOID SystemArgument1,
+	PVOID SystemArgument2)
+{
+	KdPrint(("[*] IntegrityCheck::DPCIntegrityCheckMSRs Invoked!!\n"));
+	PDeferredContextDPC DeferredStruct = (PDeferredContextDPC)DeferredContext;
+
+	KIRQL OldIrql;
+	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Raising IRQL to HIGH_LEVEL
+
+	if (!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
+	{
+		KdPrint(("IntegrityCheck::DPCIntegrityCheckMSRs: PatchGuard's MSR Timer's DPC was manipulated!\n"));
 		KeLowerIrql(OldIrql);
 
 		//0xC7: TIMER_OR_DPC_INVALID 
@@ -207,41 +247,10 @@ VOID IntegrityCheck::DPCIntegrityCheckIDT(
 			0x1);*/
 		return;
 	}
-	KdPrint(("IntegrityCheck::DPCIntegrityCheckIDT: PatchGuard's IDT Timer's DPC is valid!\n"));
+	KdPrint(("IntegrityCheck::DPCIntegrityCheckMSRs: PatchGuard's MSR Timer's DPC is valid!\n"));
 
 	KeLowerIrql(OldIrql);
 }
-
-//VOID IntegrityCheck::DPCIntegrityCheckSSDT(
-//	PKDPC Dpc,
-//	PVOID DeferredContext,		// PKTIMER TimerObjectPointer + PTIMER_INFO TimerInfo 
-//	PVOID SystemArgument1,
-//	PVOID SystemArgument2)
-//{
-//	KdPrint(("[*] IntegrityCheck::DPCIntegrityCheckSSDT Invoked!!\n"));
-//	PDeferredContextDPC DeferredStruct = (PDeferredContextDPC)DeferredContext;
-//
-//	KIRQL OldIrql;
-//	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Rising IRQL to HIGH_LEVEL
-//
-//	if (!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
-//	{
-//		KdPrint(("IntegrityCheck::DPCIntegrityCheckSSDT: PatchGuard's SSDT Timer's DPC was manipulated!\n"));
-//		KeLowerIrql(OldIrql);
-//
-//		//0xC7: TIMER_OR_DPC_INVALID 
-//		/*KeBugCheckEx(
-//			TIMER_OR_DPC_INVALID,
-//			(ULONG_PTR)DeferredStruct->TimerInfo->Dpc,
-//			(ULONG_PTR)DeferredStruct->TimerObjectPointer,
-//			(ULONG_PTR)((ULONG_PTR)DeferredStruct->TimerObjectPointer+sizeof(_KTIMER)),
-//			0x1);*/
-//		return;
-//	}
-//	KdPrint(("IntegrityCheck::DPCIntegrityCheckSSDT: PatchGuard's SSDT Timer's DPC is valid!\n"));
-//
-//	KeLowerIrql(OldIrql);
-//}
 
 IntegrityCheck::~IntegrityCheck()
 {
@@ -254,21 +263,21 @@ IntegrityCheck::~IntegrityCheck()
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierIDT wasn't initialized!\n"));
 	}
 
-	//if (CancelVerifierTimer(&TimerVerifierSSDT)){
-	//	KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT at address: 0x%p was cancelled successfully!\n", &TimerVerifierSSDT));
-	//}
+	if (CancelVerifierTimer(&TimerVerifierSSDT)){
+		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT at address: 0x%p was cancelled successfully!\n", &TimerVerifierSSDT));
+	}
 
-	//else{
-	//	KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT wasn't initialized!\n"));
-	//}
+	else{
+		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT wasn't initialized!\n"));
+	}
 
 
-	//if (CancelVerifierTimer(&TimerVerifierMSR)){
-	//	KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR at address: 0x%p was cancelled successfully!\n", &TimerVerifierMSR));
-	//}
-	//else{
-	//	KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR wasn't initialized!\n"));
-	//}
+	if (CancelVerifierTimer(&TimerVerifierMSR)){
+		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR at address: 0x%p was cancelled successfully!\n", &TimerVerifierMSR));
+	}
+	else{
+		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR wasn't initialized!\n"));
+	}
 
 	if (g_DefferedContext){
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: successfully freed g_DefferedContext in address: 0x%p\n", g_DefferedContext));
