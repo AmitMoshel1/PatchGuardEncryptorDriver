@@ -31,6 +31,45 @@ dt nt!_KTIMER 0xFFFFF8073BA68080
 ```
 ![image](https://github.com/user-attachments/assets/c55d1597-541f-45f6-999c-3f0c49d6569c)
 
-To discovered how it's constructed, I need to reverse the `KeSetTimerEx()` kernel function:
+To discovered how it's constructed, I needed to reverse the `KeSetTimerEx()` kernel function:
 ![image](https://github.com/user-attachments/assets/2651340f-f358-45e0-83b5-e80df180d2f7)
 
+After reversing the bitwise operations shown above, I created a function called `CalculateTimerDPCValue()` and a helper function called `ROR8()` function.
+The `CalculateTimerDPCValue()` takes 2 arguments:
+- The `_KDPC` base address of the associated timer. 
+- The `_KTIMER` kernel object base address.
+
+```c++
+// Right rotate function for 64-bit values
+static inline ULONG_PTR ROR8(ULONG_PTR value, BYTE shift)
+{
+	return (value >> shift) | (value << (64 - shift));
+}
+
+ULONG_PTR IntegrityCheck::CalculateTimerDPCValue(PKDPC Dpc, PKTIMER KTimer)
+{
+	ULONG_PTR KernelBaseAddress = (ULONG_PTR)g_KernelInfo->KernelBaseAddress;
+
+	// Offsets for nt!KiWaitAlways and nt!KiWaitNever (These offsets change between builds!!!)
+	ULONG_PTR KiWaitAlwaysAddress = KernelBaseAddress + 0x00fc5260;
+	ULONG_PTR KiWaitNeverAddress = KernelBaseAddress + 0x00fc4f80;
+
+	// Read values from memory
+	ULONG_PTR KiWaitAlwaysValue = *(ULONG_PTR*)KiWaitAlwaysAddress;
+	ULONG_PTR KiWaitNeverValue = *(ULONG_PTR*)KiWaitNeverAddress;
+
+	// Read the shift count from KiWaitNever (ensuring it's a valid rotation amount)
+	BYTE shift = *(BYTE*)(KiWaitNeverAddress) & 0x3F; // Masking to avoid invalid shifts (0x3F = 63)
+
+	ULONG_PTR intermediate = _byteswap_uint64((ULONG_PTR)Dpc ^ KiWaitAlwaysValue);
+	ULONG_PTR rotated = ROR8(intermediate ^ (ULONG_PTR)KTimer, shift);
+
+	return rotated ^ KiWaitNeverValue;
+}
+```
+
+After calculating the bitwised **DPC** value of the relative patch guard timer's **DPC**, I compared this value, with the currently setted value within the patch guard's timer.
+
+The second check performed takes the original `DeferredRoutine` function pointer associated with the patch guard timer's DPC and dynamically compares it with the current `DeferredRoutine` function pointer setted in the `_KDPC` object.
+
+These checks are performed in each IntegrityCheck timer responsible for the integrity of each patch guard's timer I created.
