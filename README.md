@@ -73,3 +73,5 @@ After calculating the bitwised **DPC** value of the relative patch guard timer's
 The second check performed takes the original `DeferredRoutine` function pointer associated with the patch guard timer's DPC and dynamically compares it with the current `DeferredRoutine` function pointer setted in the `_KDPC` object.
 
 These checks are performed in each IntegrityCheck timer responsible for the integrity of each patch guard's timer initially created by the driver.
+
+--PLEASE NOTE THAT THE OFFSETS USED IN THIS DRIVER ARE HARDCODED AND ARE DIFFERENT BETWEEN OS BUILDS!!--
