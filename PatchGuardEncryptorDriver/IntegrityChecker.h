@@ -13,7 +13,7 @@ typedef struct DeferredContextDPC
 {
 	PKTIMER TimerObjectPointer;
 	PTIMER_INFO TimerInfo;
-} DeferredContextDPC, *PDeferredContextDPC;
+} DeferredContextDPC, * PDeferredContextDPC;
 
 struct IntegrityCheck
 {
@@ -22,12 +22,12 @@ struct IntegrityCheck
 
 	BOOLEAN CancelVerifierTimer(PKTIMER Timer);
 	VOID InitializeDPC(PKTIMER Timer, PKDPC Dpc, PVOID DeferredRoutine, PVOID DeferredContext);
-	
+
 	static VOID DPCIntegrityCheckIDT(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
 	static VOID DPCIntegrityCheckSSDT(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
 	static VOID DPCIntegrityCheckMSRs(_KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
 
-	static ULONG_PTR CalculateTimerDPCValue(PKDPC Dpc,  PKTIMER KTimer);
+	static ULONG_PTR CalculateTimerDPCValue(PKDPC Dpc, PKTIMER KTimer);
 	static BOOLEAN TimerChecker(PKTIMER TimerObjectPointer, PTIMER_INFO TimerInfo);
 
 	KTIMER TimerVerifierSSDT;

@@ -98,7 +98,7 @@ VOID UnloadRoutine(PDRIVER_OBJECT DriverObject)
 		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated SSDT_ENTRY entries allocated from non-paged pool!\n"));
 	}
 
-	if(g_TimerInfoArray)
+	if (g_TimerInfoArray)
 	{
 		ExFreePool(g_TimerInfoArray);
 		KdPrint(("[*] PatchGuardEncryptor::UnloadRoutine: successfully freed the allocated TIMER_INFO entries allocated from non-paged pool!\n"));
@@ -137,10 +137,11 @@ VOID NTAPI EnumerateIDT()
 	KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: _KPRCB Base Address: 0x%p\n", CurrentPrcb));
 	KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: _KPCR.IdtBase Base Address: 0x%p\n", IdtBaseAddress));
 
-	// taken from reversing nt!KiGetGdtIdt()
-	//PVOID IDT_BaseAddress2;
-	//__sidt(&IDT_BaseAddress2); // stores the value in the IDTR register <- For testing purposes only!
-	//KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: IdtBase Base Address from __sidt instruction: 0x%p\n", IdtBaseAddress));
+	// Bonus: Another way of dynamically getting the IDT base address:
+	// I found it through reversing the nt!KiGetGdtIdt() function
+	PVOID IDT_BaseAddress2;
+	__sidt(&IDT_BaseAddress2); // stores the value in the IDTR register <- shown only for demonstration 
+	KdPrint(("[*] PatchGuardEncryptor::EnumerateIDT: IdtBase Base Address from __sidt instruction: 0x%p\n", IdtBaseAddress));
 
 	_KIDTENTRY64* IDTEntry = (_KIDTENTRY64*)(IdtBaseAddress);
 
@@ -157,7 +158,7 @@ VOID NTAPI EnumerateIDT()
 			}
 
 			ULONG_PTR High = *(DWORD32*)((CHAR*)IDTEntry + 8);		// Using IDTEntry->OffsetHigh returned a false value
-			ULONG_PTR Middle = *(USHORT*)((CHAR*)IDTEntry + 6);		// Using IDTEntry->OffsetMedium returned a false value
+			ULONG_PTR Middle = *(USHORT*)((CHAR*)IDTEntry + 6);		// Using IDTEntry->OffsetMiddle returned a false value
 			ULONG_PTR Low = IDTEntry->OffsetLow;
 
 			ULONG_PTR ServiceRoutine = High << 32;
@@ -241,56 +242,13 @@ extern "C" VOID GetNtosBaseAddress()
 			KdPrint(("[*] PatchGuardEncryptor::GetNtosBaseAddress: NtQuerySystemInformation failed with: 0x%x\n", status));
 			return;
 		}
-		//g_KernelBaseAddress = (ULONG_PTR)ModuleInformationMemory->Modules[0].ImageBase;
+		
 		g_KernelInfo->KernelBaseAddress = ModuleInformationMemory->Modules[0].ImageBase;
 		g_KernelInfo->Size = ModuleInformationMemory->Modules[0].ImageSize;
 
+		KdPrint(("GetNtosBaseAddress(): Kernel Base Address: 0x%p\n", g_KernelInfo->KernelBaseAddress));
+
 	}
-}
-
-PVOID GetKiServiceTableBaseAddress()
-{
-	/*
-		This function is responsible to dynamically resolve the base address of the nt!KiServiceTable,
-		which is the SSDT base address through checking a set of opcodes as a pattern used to dynamically
-		deteremine the base address of nt!KiServiceTable.
-	*/
-
-	GetNtosBaseAddress(); // should fill the g_KernelInfo data structure with kernel base address and size
-
-	KdPrint(("Ntoskrnl base address: 0x%p\n", g_KernelInfo->KernelBaseAddress));
-	KdPrint(("Ntoskrnl size: %d bytes\n", g_KernelInfo->Size));
-
-	if (g_KernelInfo->KernelBaseAddress && g_KernelInfo->Size)
-	{
-		ULONG_PTR BaseAddress = (ULONG_PTR)g_KernelInfo->KernelBaseAddress;
-		int internal_counter = 0;
-		for (int i = 0; i < g_KernelInfo->Size; i++)
-		{
-			CHAR CurrentOpCode = *(CHAR*)((CHAR*)BaseAddress + i);
-			if (CurrentOpCode == KiServiceTableOpCodes[0])
-			{
-				for (int j = i; j < i + sizeof(KiServiceTableOpCodes); j++)
-				{
-					if (*(CHAR*)((CHAR*)BaseAddress + j) != KiServiceTableOpCodes[internal_counter])
-					{
-						internal_counter = 0;
-						break;
-					}
-
-					internal_counter++;
-				}
-
-				if (internal_counter == sizeof(KiServiceTableOpCodes))
-				{
-					KdPrint(("[*] PatchGuardEncryptorDriver::GetKiServiceTableBaseAddress: nt!KiServiceTable Base Address: 0x%p\n", (PVOID)(BaseAddress + i)));
-					return (PVOID)(BaseAddress + i);
-				}
-			}
-		}
-	}
-
-	return 0;
 }
 
 VOID FillNumberOfSSDTEntries()
@@ -307,14 +265,19 @@ VOID FillNumberOfSSDTEntries()
 
 	if (!g_KiServiceTableAddress)
 	{
-		//The KiServiceTable offset is currently hardcoded for testing purposes
+		//The nt!KiServiceTable offset is hardcoded - offset can be changed between different builds!!
 		g_KiServiceTableAddress = (PVOID)(((ULONG_PTR)g_KernelInfo->KernelBaseAddress) + 0xd4270);
 		KdPrint(("nt!KiServiceTable address: 0x%p\n", g_KiServiceTableAddress));
 	}
 
 	ULONG_PTR CurrentSSDTEntry = (ULONG_PTR)g_KiServiceTableAddress;
+	if((CurrentSSDTEntry & 0xfffff00000000000) != 0xfffff00000000000) // checking if the given address is a valid kernel address - without it I encountered a rabdom BSOD
+	{
+		KdPrint(("CurrentSSDTEntry is invalid! (0x%p) returning...\n", CurrentSSDTEntry));
+		return;
+	}
 
-	int limiter = 300;
+	int limiter = 300;	// Used to avoid a case of infinite iteration over the kernel space
 	while (*(DWORD*)CurrentSSDTEntry || limiter--)
 	{
 		// I made some bitwise operations that determines if the currently iterated DWORD
@@ -355,7 +318,7 @@ VOID EnumerateSSDT()
 
 		If the boolean is false, meaning it's isn't the first time the function runs.
 		A for loop will iterate over each current value in the SSDT, and will dynamically compare the relative value with
-		the current SSDT entry value, if it fails, a BSOD will be invoked!
+		the current SSDT entry value, if it fails, a BSOD will be invoked in a production! in our case, we'll KdPrint(()) a message
 	*/
 
 	if (g_IsInitialSSDT)
@@ -369,14 +332,6 @@ VOID EnumerateSSDT()
 
 		//g_KiServiceTableAddress = GetKiServiceTableBaseAddress(); // This will fill the g_KiServiceTableAddress with nt!KiServiceTable base address
 		g_KiServiceTableAddress = (PVOID)(((ULONG_PTR)g_KernelInfo->KernelBaseAddress) + 0xd4270); // hardcoded offset for testing purposes
-
-		//FillNumberOfSSDTEntries();
-		//
-		//if(!g_Number_Of_SSDT_Entries)
-		//{
-		//	KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: g_Number_Of_SSDT_Entries is %d!\n", g_Number_Of_SSDT_Entries));
-		//	return;
-		//}
 
 		KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: Number of SSDT entries found: %d!\n", g_Number_Of_SSDT_Entries));
 
@@ -395,8 +350,6 @@ VOID EnumerateSSDT()
 	for (int i = 0; i < g_Number_Of_SSDT_Entries; i++)
 	{
 		ULONG_PTR CurrentSSDTEntryPointer = (ULONG_PTR)(((BYTE*)LocalKiServiceTableAddress) + (i * sizeof(DWORD)));
-
-		//if (g_InitialSSDTEntries[i].SSDTValue != *(DWORD*)((BYTE*)LocalKiServiceTableAddress + (i * sizeof(DWORD))))
 		if (g_InitialSSDTEntries[i].SSDTValue != *(DWORD*)CurrentSSDTEntryPointer)
 		{
 			KdPrint(("[*] PatchGuardEncryptor::EnumerateSSDT: Original SSDT entry value: 0x%x at 0x%p was changed to: 0x%x!!\n", g_InitialSSDTEntries[i].SSDTValue, CurrentSSDTEntryPointer, *(DWORD*)CurrentSSDTEntryPointer));
@@ -933,19 +886,21 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
 	// When it's currently being invoked, successfully loads and unloads for the first time
 	// When attempting to load the driver for the second time, we get a BSOD
-	
+
 	g_Verifier = new(1, NonPagedPool)IntegrityCheck(g_TimerInfoArray);
-		
+
 	/*
 		it's possible to dynamically get the address of exported kernel variables (yes, variables not only functions)
 		using the MmGetSystemRoutineAddress() kernel function.
 
 		The KdDebuggerEnabled variable, is global exported kernel variable, which means that it's possible to
 		dynamically resolve the address of it using the MmGetSystemRoutineAddress() as done below:
+
+		UNICODE_STRING KdDebuggerEnabledName = RTL_CONSTANT_STRING(L"KdDebuggerEnabled");
+		PVOID KdDebuggerEnabledAddress = MmGetSystemRoutineAddress(&KdDebuggerEnabledName);
+		KdPrint(("[*] PatchGuardEncryptorDriver: nt!KdDebuggerEnabled global kernel variable at address: 0x%p\n", KdDebuggerEnabledAddress));	
 	*/
-	//UNICODE_STRING KdDebuggerEnabledName = RTL_CONSTANT_STRING(L"KdDebuggerEnabled");
-	//PVOID KdDebuggerEnabledAddress = MmGetSystemRoutineAddress(&KdDebuggerEnabledName);
-	//KdPrint(("[*] PatchGuardEncryptorDriver: nt!KdDebuggerEnabled global kernel variable at address: 0x%p\n", KdDebuggerEnabledAddress));
+
 
 	return status;
 }

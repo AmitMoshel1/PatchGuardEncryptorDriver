@@ -24,7 +24,7 @@ IntegrityCheck::IntegrityCheck(PTIMER_INFO TimerInfoArr) : TimerInfoArray(TimerI
 
 	KeInitializeTimerEx(&TimerVerifierSSDT, NotificationTimer);
 	KdPrint(("IntegrityCheck::IntegrityCheck() SSDT Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierSSDT)));
-	
+
 	KeInitializeTimerEx(&TimerVerifierMSR, NotificationTimer);
 	KdPrint(("IntegrityCheck::IntegrityCheck() MSR Verifier _KTIMER object initialized successfully at address: 0x%p\n", &(TimerVerifierMSR)));
 
@@ -74,7 +74,7 @@ IntegrityCheck::IntegrityCheck(PTIMER_INFO TimerInfoArr) : TimerInfoArray(TimerI
 
 BOOLEAN IntegrityCheck::CancelVerifierTimer(PKTIMER Timer)
 {
-	return KeCancelTimer(Timer);;
+	return KeCancelTimer(Timer);
 }
 
 
@@ -176,7 +176,7 @@ VOID IntegrityCheck::DPCIntegrityCheckIDT(
 	KIRQL OldIrql;
 	KeRaiseIrql(HIGH_LEVEL, &OldIrql); // Raising IRQL to HIGH_LEVEL
 
-	if(!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
+	if (!TimerChecker(DeferredStruct->TimerObjectPointer, DeferredStruct->TimerInfo))
 	{
 		KdPrint(("IntegrityCheck::DPCIntegrityCheckIDT: PatchGuard's IDT Timer's DPC was manipulated!\n"));
 		KeLowerIrql(OldIrql);
@@ -255,31 +255,30 @@ VOID IntegrityCheck::DPCIntegrityCheckMSRs(
 IntegrityCheck::~IntegrityCheck()
 {
 	KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck Destructor invoked!\n"));
-	if (CancelVerifierTimer(&TimerVerifierIDT)){
+	if (CancelVerifierTimer(&TimerVerifierIDT)) {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierIDT at address: 0x%p was cancelled successfully!\n", &TimerVerifierIDT));
 	}
 
-	else{
+	else {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierIDT wasn't initialized!\n"));
 	}
 
-	if (CancelVerifierTimer(&TimerVerifierSSDT)){
+	if (CancelVerifierTimer(&TimerVerifierSSDT)) {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT at address: 0x%p was cancelled successfully!\n", &TimerVerifierSSDT));
 	}
 
-	else{
+	else {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierSSDT wasn't initialized!\n"));
 	}
 
-
-	if (CancelVerifierTimer(&TimerVerifierMSR)){
+	if (CancelVerifierTimer(&TimerVerifierMSR)) {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR at address: 0x%p was cancelled successfully!\n", &TimerVerifierMSR));
 	}
-	else{
+	else {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: TimerVerifierMSR wasn't initialized!\n"));
 	}
 
-	if (g_DefferedContext){
+	if (g_DefferedContext) {
 		KdPrint(("[*] PatchGuardEncryptorDriver::~IntegrityCheck: successfully freed g_DefferedContext in address: 0x%p\n", g_DefferedContext));
 		ExFreePool(g_DefferedContext);
 	}
