@@ -8,7 +8,7 @@ I created My own **Patch Guard** driver that dynamically monitors the following 
 At `DriverEntry()` the driver starts by initially capturing each mechanism's state (**initial MSR state**, **initial IDT state** and **initial SSDT state**) at **driver load time** and saves it into **kernel memory**.
 
 The monitoring is performed through allocating **3 timers** (`_KTIMER` objects) in **kernel space** (for each monitored mechanism) and each timer has an associated **DPC** attached to it.
-- The **SSDT monitoring timer** has an **associated DPC routine** that gets the **base address** of the **SSDT** and compares each **SSDT entry** with the inital state's relative **SSDT** entry. The number of **SSDT** entries available on the system is resolved at `DriverEntry()` using the function `FillNumberOfSSDTEntries()` function in the driver and is saved into a a global driver variable.
+- The **SSDT monitoring timer** has an **associated DPC routine** that gets the **base address** of the **SSDT** and compares each **SSDT entry** with the inital state's relative **SSDT** entry. The number of **SSDT** entries available on the system is resolved at `DriverEntry()` using the function `FillNumberOfSSDTEntries()` function in the driver and is saved into a global driver variable.
    
 - The **IDT monitoring timer** has an **associated DPC routine** that runs over each entry in the **IDT** and compares each entry with the initial **IDT** entry value captured at driver load.
 
@@ -31,7 +31,7 @@ dt nt!_KTIMER 0xFFFFF8073BA68080
 ```
 ![image](https://github.com/user-attachments/assets/c55d1597-541f-45f6-999c-3f0c49d6569c)
 
-To discovered how it's constructed, I needed to reverse the `KeSetTimerEx()` kernel function:
+To discover how it's constructed, I needed to reverse the `KeSetTimerEx()` kernel function:
 ![image](https://github.com/user-attachments/assets/2651340f-f358-45e0-83b5-e80df180d2f7)
 
 After reversing the bitwise operations shown above, I created a function called `CalculateTimerDPCValue()` and a helper function called `ROR8()` function.
@@ -72,4 +72,4 @@ After calculating the bitwised **DPC** value of the relative patch guard timer's
 
 The second check performed takes the original `DeferredRoutine` function pointer associated with the patch guard timer's DPC and dynamically compares it with the current `DeferredRoutine` function pointer setted in the `_KDPC` object.
 
-These checks are performed in each IntegrityCheck timer responsible for the integrity of each patch guard's timer I created.
+These checks are performed in each IntegrityCheck timer responsible for the integrity of each patch guard's timer initially created by the driver.
