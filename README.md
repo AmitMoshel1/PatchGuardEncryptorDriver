@@ -17,6 +17,7 @@ The monitoring is performed through allocating **3 timers** (`_KTIMER` objects) 
 
 At the **start of the Each DPC routine**, the **IRQL** of the processor immediately increases to **HIGH_LEVEL** (**0xf**), this is because an attacker can potentially overwrite an entry in one of the monitored mechanisms and also immediately increase the **IRQL** to **HIGH_LEVEL** to avoid the timer's DPCs from invoking.
 At the **end of the DPC routine**, the **IRQL** is lowered back to **DISPATCH_LEVEL** (**0x2**) using the `KeLowerIrql()` function.
+
 **NOTE:** This DPC manipulation mentioned is only relevant for **single core environment** since IRQL is per LP.
 This doesn't prevent an attacker from manipulating the DPC through another processor.
 
